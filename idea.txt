@@ -1,0 +1,38 @@
+# --- SETS ---
+t in T              # time
+
+# --- PARAMETERS ---
+load_house(t)       # from Mölndal profiles
+gen_pv(t)           # from Mölndal profiles & Niclas GIS
+
+c_el(t)             # from Elli? current?
+(p_el(t)             # same as c_el(t)? different?)
+
+size_bess           # battery size (kW)
+rate_bess           # charging rate
+
+# --- VARIABLES ---
+buy_el(t)           # kWh
+sell_el(t)          # kWh
+
+charge_bess(t)      # kWh
+discharge_bess(t)   # kWh
+soc_bess(t)         # kWh
+
+# --- CONSTRAINTS ---
+# objective function
+minimize C_tot >= sum_t{ c_el(t) * netload_house(t) }       # positive if buying, negative if selling
+
+# supply-demand
+netload_house(t) >= load_house(t) - gen_pv(t) + charge_bess(t) - discharge_bess(t)       for all t
+
+# bess charging constraints
+if charge_bess(t) >0, discharge_bess(t) =0      for all t    # and viceversa
+
+soc_bess(t) <= size_bess; >= 0                      for all t
+charge_bess(t) <= rate_bess*size_bess; >= 0         for all t
+discharge_bess(t) <= rate_bess*size_bess; >= 0      for all t
+
+soc_bess(t) >= soc_bess(t-1) + charge_bess(t) - discharge_bess(t)       for all t
+
+# number of cycles constraint?
