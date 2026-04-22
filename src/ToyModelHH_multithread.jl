@@ -1,17 +1,29 @@
 using JuMP, HiGHS, PrettyTables, CSV, DataFrames
 const AxisArray = Containers.DenseAxisArray
 
-include("inputdata.jl")
-include("ToyModelHH_loop.jl")
+include("src/inputdata.jl")
+include("src/ToyModelHH_loop.jl")
 
 function runmodel_multithread()
-    (; profiles) = read_input_data()
+    (; profiles, facility_df) = read_input_data()
 
     load_profiles = collect(Base.axes(profiles.loadHH, 2))
     gen_profiles  = collect(Base.axes(profiles.genPVhh, 2))
+    gen_pool      = build_genPV_pools(gen_profiles)
 
-    combinations   = [(load_p, gen_p) for load_p in load_profiles for gen_p in gen_profiles]
-    n_combinations = length(combinations)
+    # Build one task per loadHH profile: fuse size → BESS type, random genPV draw
+    tasks = Tuple{Symbol, Symbol, Symbol}[]
+    for load_p in load_profiles
+        facility_row = filter(r -> r.facility_id == String(load_p), facility_df)
+        if isempty(facility_row)
+            @warn "No facility entry found for load profile $(load_p). Skipping."
+            continue
+        end
+        bess_type = fuse_to_bess(facility_row[1, :contract_fuse_size])
+        gen_p     = rand(gen_pool)
+        push!(tasks, (Symbol(load_p), Symbol(gen_p), bess_type))
+    end
+    n_combinations = length(tasks)
     n_threads      = Threads.nthreads()
     n_batches      = ceil(Int, n_combinations / n_threads)
     println("Total combinations: $n_combinations  |  Threads: $n_threads  |  Batches: ~$n_batches")
@@ -29,18 +41,18 @@ function runmodel_multithread()
     completed_count  = Threads.Atomic{Int}(0)
 
     try
-        Threads.@threads for i in eachindex(combinations)
+        Threads.@threads for i in eachindex(tasks)
 
             stop_flag[] && continue
 
-            load_p, gen_p = combinations[i]
-            batch_num     = ceil(Int, i / n_threads)   # which batch this combination belongs to
+            load_p, gen_p, bess_type = tasks[i]
+            batch_num = ceil(Int, i / n_threads)   # which batch this combination belongs to
 
             lock(print_lock) do
-                println("[batch $batch_num/$n_batches | run $i/$n_combinations | thread $(Threads.threadid())]  Starting: load=$load_p  gen=$gen_p")
+                println("[batch $batch_num/$n_batches | run $i/$n_combinations | thread $(Threads.threadid())]  Starting: load=$load_p  bess=$bess_type  gen=$gen_p")
             end
 
-            ToyModelHH, params, vars, constraints = makemodel(Symbol(load_p), Symbol(gen_p))
+            ToyModelHH, params, vars, constraints = makemodel(load_p, gen_p, bess_type)
 
             (; TIME) = params
             (; NetloadHH, HHcost) = vars
@@ -55,7 +67,7 @@ function runmodel_multithread()
                 continue
             end
 
-            run_label    = "run_$(i)_load$(load_p)_gen$(gen_p)"
+            run_label    = "run_$(i)_load$(load_p)_bess$(bess_type)_gen$(gen_p)"
             netload_vals = [round(value(NetloadHH[t]), digits=4) for t in TIME]
             total_cost   = round(value(HHcost),         digits=4)
 

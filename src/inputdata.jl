@@ -14,9 +14,6 @@ function df_cleanup!(df)
     # Create time column and remove "id_timestamp" column
     df.time = 1:nrow(df)
     select!(df, :time, cols_to_keep...)
-    # Create a mapping from old names to new names
-    rename_map = Dict(cols_to_keep .=> Symbol.("profile_", 1:length(cols_to_keep)))
-    rename!(df, rename_map)
 end
 
 function df_to_axisarray(df)
@@ -40,6 +37,9 @@ function read_input_data()
     elprice_df = DataFrame(XLSX.readtable(joinpath(input_path, "Electricity_Cost_Sweden_SE3.xlsx"), "new_price_profiles2025"))
     elprice_df = elprice_df[repeat(1:nrow(elprice_df), inner=4), :]
     elprice_df.time = 1:nrow(elprice_df)
+
+    # Read facility metadata
+    facility_df = CSV.read(joinpath(input_path, "facility.csv"), DataFrame)
 
     # Read input data from CSV files
     loadAPT_df = CSV.read(joinpath(input_path, "APT_sampled_profiles_merged.csv"), DataFrame)
@@ -66,7 +66,7 @@ function read_input_data()
     price = (; present=Array(elprice_df."2030"), future=Array(elprice_df."2050"))
     profiles = (; loadAPT, loadHH, genPVapt, genPVhh)
 
-    return (; price, profiles)
+    return (; price, profiles, facility_df)
 end
 
 readrow(table, rownum, headings) = NamedTuple(h => table[rownum, i+1] for (i, h) in enumerate(headings))    # +1 to ignore the first table column
@@ -90,4 +90,20 @@ function read_input_tables()
     ]
 
     return (; tariffparameters, batteryparameters)
+end
+
+const FUSE_TO_BESS = Dict(16 => :BESS6, 20 => :BESS10, 25 => :BESS13, 35 => :BESS20)
+
+function fuse_to_bess(fuse_size)
+    bess = get(FUSE_TO_BESS, Int(fuse_size), nothing)
+    if isnothing(bess)
+        error("No BESS mapping defined for fuse size $(fuse_size)A. Known sizes: $(sort(collect(keys(FUSE_TO_BESS))))A")
+    end
+    return bess
+end
+
+# Placeholder: returns all genPVhh profile IDs as a single flat pool.
+# Replace this function to partition profiles by fuse size or PV peak power.
+function build_genPV_pools(genPVhh_profiles)
+    return genPVhh_profiles
 end
