@@ -1,5 +1,20 @@
 using DataFrames, CSV, XLSX, AxisArrays
 
+function prepare_elprice(df, ordered_timestamp)
+    område = ["SE1", "SE2", "SE3", "SE4"]
+    sweden = filter(row -> row.MapCode in område, df)
+    select!(sweden, [Symbol("DateTime(UTC)"), :MapCode, Symbol("Price[Currency/MWh]")])
+    sweden = unstack(sweden, :MapCode, Symbol("Price[Currency/MWh]"))
+    rename!(sweden, Symbol("DateTime(UTC)") => :id_timestamp)
+
+    ordered_timestamp[!, :id_timestamp] = string.(ordered_timestamp.id_timestamp)
+    sweden[!, :id_timestamp] = string.(sweden.id_timestamp)
+    sweden[!, :id_timestamp] = sweden.id_timestamp .* "+00:00"
+    elprice = semijoin(sweden, ordered_timestamp, on = :id_timestamp)
+
+    return elprice
+end
+
 function df_cleanup!(df)
     # Define columns to keep
     if "id_timestamp" in names(df)
@@ -34,9 +49,10 @@ function read_input_data()
     input_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Input"
 
     # Read electricity price data
-    elprice_df = DataFrame(XLSX.readtable(joinpath(input_path, "Electricity_Cost_Sweden_SE3.xlsx"), "new_price_profiles2025"))
+    entsoe = CSV.read(joinpath(input_path, "ENTSOE day ahead energy prices 2015-2026.csv"), DataFrame)
+    ordered_timestamp = CSV.read(joinpath(input_path, "ordered_timestamp.csv"), DataFrame)
+    elprice_df = prepare_elprice(entsoe, ordered_timestamp)
     elprice_df = elprice_df[repeat(1:nrow(elprice_df), inner=4), :]
-    elprice_df.time = 1:nrow(elprice_df)
 
     # Read facility metadata
     facility_df = CSV.read(joinpath(input_path, "facility.csv"), DataFrame)
@@ -63,7 +79,7 @@ function read_input_data()
     genPVhh = df_to_axisarray(genPVhh_df)
 
     # Collect data for return
-    price = (; present=Array(elprice_df."2030"), future=Array(elprice_df."2050"))
+    price = (; SE1=Array(elprice_df."SE1"), SE2=Array(elprice_df."SE2"), SE3=Array(elprice_df."SE3"), SE4=Array(elprice_df."SE4"))
     profiles = (; loadAPT, loadHH, genPVapt, genPVhh)
 
     return (; price, profiles, facility_df)
