@@ -1,11 +1,17 @@
 using JuMP, HiGHS, PrettyTables, CSV, DataFrames
 const AxisArray = Containers.DenseAxisArray
 
-include("src/inputdata.jl")
-include("src/ToyModelHH_loop.jl")
+include(joinpath(@__DIR__, "ToyModelHH_loop.jl"))
 
 function runmodel_multithread()
-    (; profiles, facility_df) = read_input_data()
+    # Prompt for area selection
+    print("Enter area (SE1/SE2/SE3/SE4): ")
+    area_str = strip(readline())
+    area = Symbol(area_str)
+    area ∉ (:SE1, :SE2, :SE3, :SE4) && error("Invalid area: \"$area_str\". Valid options are SE1, SE2, SE3, SE4.")
+
+    (; price, profiles, facility_df) = read_input_data()
+    tariff_tables = read_input_tables()
 
     load_profiles = collect(Base.axes(profiles.loadHH, 2))
     gen_profiles  = collect(Base.axes(profiles.genPVhh, 2))
@@ -19,7 +25,12 @@ function runmodel_multithread()
             @warn "No facility entry found for load profile $(load_p). Skipping."
             continue
         end
-        bess_type = fuse_to_bess(facility_row[1, :contract_fuse_size])
+        fuse_size = facility_row[1, :contract_fuse_size]
+        if ismissing(fuse_size)
+            @warn "Missing fuse size for load profile $(load_p). Skipping."
+            continue
+        end
+        bess_type = fuse_to_bess(fuse_size)
         gen_p     = rand(gen_pool)
         push!(tasks, (Symbol(load_p), Symbol(gen_p), bess_type))
     end
@@ -30,7 +41,7 @@ function runmodel_multithread()
 
     output_path  = raw"C:\Users\corte\Documents\REGAL_ToyModel\Output"
     # output_file  = joinpath(output_path, "ToyModelHH_results_all_mt.csv")  # not used for now
-    netload_file = joinpath(output_path, "ToyModelHH_netload_mt.csv")
+    netload_file = joinpath(output_path, "ToyModelHH_netload_$(area)_mt.csv")
 
     # isfile(output_file)  && rm(output_file)   # not used for now
     isfile(netload_file) && rm(netload_file)
@@ -52,7 +63,7 @@ function runmodel_multithread()
                 println("[batch $batch_num/$n_batches | run $i/$n_combinations | thread $(Threads.threadid())]  Starting: load=$load_p  bess=$bess_type  gen=$gen_p")
             end
 
-            ToyModelHH, params, vars, constraints = makemodel(load_p, gen_p, bess_type)
+            ToyModelHH, params, vars, constraints = makemodel(load_p, gen_p, bess_type, area, price, profiles, tariff_tables)
 
             (; TIME) = params
             (; NetloadHH, HHcost) = vars
@@ -123,42 +134,17 @@ function runmodel_multithread()
         println("Completed runs: $n_saved / $n_combinations")
 
         if n_saved > 0
-            println("Writing netload CSV incrementally...")
+            println("Writing netload CSV...")
 
-            # Collect only the solved results in order
+            # Collect completed results in order (preserves run indices from pre-allocated vector)
             solved = [(label, vals) for (label, vals) in skipmissing(
                       [isnothing(r) ? missing : r for r in results])]
 
-            # Build and write in chunks of 100 columns to limit memory usage
-            chunk_size = 100
-            first_chunk = true
-            TIME = 1:35040
-
-            for chunk_start in 1:chunk_size:length(solved)
-                chunk_end = min(chunk_start + chunk_size - 1, length(solved))
-                chunk     = solved[chunk_start:chunk_end]
-
-                chunk_df = DataFrame(time = collect(TIME))
-                for (run_label, netload_vals) in chunk
-                    chunk_df[!, Symbol(run_label)] = netload_vals
-                end
-
-                if first_chunk
-                    CSV.write(netload_file, chunk_df)
-                    first_chunk = false
-                else
-                    # Append columns: re-read existing file and merge
-                    existing_df = CSV.read(netload_file, DataFrame)
-                    merged_df   = hcat(existing_df, chunk_df[:, 2:end])
-                    CSV.write(netload_file, merged_df)
-                end
-
-                println("  Written columns $(chunk_start) to $(chunk_end) / $(length(solved))")
-
-                # Free chunk memory immediately
-                chunk_df = nothing
-                GC.gc()
+            netload_df = DataFrame(time = collect(1:35040))
+            for (run_label, netload_vals) in solved
+                netload_df[!, Symbol(run_label)] = netload_vals
             end
+            CSV.write(netload_file, netload_df)
 
             println("Netload profiles written to: $netload_file  ($n_saved runs saved)")
         else

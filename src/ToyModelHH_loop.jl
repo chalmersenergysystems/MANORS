@@ -3,9 +3,9 @@ const AxisArray = Containers.DenseAxisArray
 
 export makeparameters, makevariables, makeconstraints, makemodel, runmodel, printtable
 
-include("inputdata.jl")
+include(joinpath(@__DIR__, "inputdata.jl"))
 
-function makeparameters(load_profile, gen_profile, bess_type)
+function makeparameters(load_profile, gen_profile, bess_type, area::Symbol)
     (; price, profiles) = read_input_data()
     (; tariffparameters, batteryparameters) = read_input_tables()
 
@@ -15,7 +15,7 @@ function makeparameters(load_profile, gen_profile, bess_type)
     BESS = [:BESS6, :BESS10, :BESS13, :BESS20]
 
     # --- Model parameters ---
-    elprice2030 = price.present[TIME]                   # €/MWh, 15-min resolution
+    elprice = getproperty(price, area)[TIME]             # €/MWh, 15-min resolution
     loadHH = profiles.loadHH[TIME, load_profile]        # kWh/15-min
     genPV = profiles.genPVhh[TIME, gen_profile]         # kWh/15-min
 
@@ -23,7 +23,26 @@ function makeparameters(load_profile, gen_profile, bess_type)
 
     sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS = readtable(batteryparameters, BESS)
 
-    return (; TIME, AREA, bess_type, loadHH, genPV, tariffHH, compensationPV, elprice2030, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS)
+    return (; TIME, AREA, area, bess_type, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS)
+end
+
+function makeparameters(load_profile, gen_profile, bess_type, area::Symbol, price, profiles, tariff_tables)
+    (; tariffparameters, batteryparameters) = tariff_tables
+
+    # --- Model sets ---
+    TIME = 1:35040
+    AREA = [:SE1, :SE2, :SE3, :SE4]
+    BESS = [:BESS6, :BESS10, :BESS13, :BESS20]
+
+    # --- Model parameters ---
+    elprice     = getproperty(price, area)[TIME]        # €/MWh, 15-min resolution
+    loadHH      = profiles.loadHH[TIME, load_profile]   # kWh/15-min
+    genPV       = profiles.genPVhh[TIME, gen_profile]   # kWh/15-min
+
+    tariffHH, _, compensationPV = readtable(tariffparameters, AREA)
+    sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS = readtable(batteryparameters, BESS)
+
+    return (; TIME, AREA, area, bess_type, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS)
 end
 
 function makevariables(model, params)
@@ -43,7 +62,7 @@ function makevariables(model, params)
 end
 
 function makeconstraints(model, vars, params)
-    (; TIME, bess_type, loadHH, genPV, tariffHH, compensationPV, elprice2030, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS) = params
+    (; TIME, area, bess_type, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS) = params
     (; HHcost, Buy, Sell, NetloadHH, ChargeBESS, DischargeBESS, SocBESS) = vars
     
     @constraints model begin
@@ -69,16 +88,16 @@ function makeconstraints(model, vars, params)
             NetloadHH[t] == Buy[t] - Sell[t]
 
         Totalcosts,
-            HHcost == sum(Buy[t] * (elprice2030[t] + tariffHH[:SE3]) for t in TIME) - sum(Sell[t] * (elprice2030[t] + compensationPV[:SE3]) for t in TIME)
+            HHcost == sum(Buy[t] * (elprice[t] + tariffHH[area]) for t in TIME) - sum(Sell[t] * (elprice[t] + compensationPV[area]) for t in TIME)
     end
 
     return (; BalanceHH, BalanceBESS, LimitsSocBESS, LimitsChargeBESS, LimitsDischargeBESS, NetloadHHdef, Totalcosts)
 end
 
-function makemodel(load_profile, gen_profile, bess_type)
+function makemodel(load_profile, gen_profile, bess_type, area::Symbol)
     model = Model(HiGHS.Optimizer)
 
-    params = makeparameters(load_profile, gen_profile, bess_type)
+    params = makeparameters(load_profile, gen_profile, bess_type, area)
     vars = makevariables(model, params)
     constraints = makeconstraints(model, vars, params)
 
@@ -91,7 +110,30 @@ function makemodel(load_profile, gen_profile, bess_type)
     return model, params, vars, constraints
 end
 
+function makemodel(load_profile, gen_profile, bess_type, area::Symbol, price, profiles, tariff_tables)
+    model = Model(HiGHS.Optimizer)
+    set_silent(model)
+
+    params      = makeparameters(load_profile, gen_profile, bess_type, area, price, profiles, tariff_tables)
+    vars        = makevariables(model, params)
+    constraints = makeconstraints(model, vars, params)
+
+    (; HHcost) = vars
+
+    @objective model Min begin
+        HHcost
+    end
+
+    return model, params, vars, constraints
+end
+
 function runmodel()
+    # Prompt for area selection
+    print("Enter area (SE1/SE2/SE3/SE4): ")
+    area_str = strip(readline())
+    area = Symbol(area_str)
+    area ∉ (:SE1, :SE2, :SE3, :SE4) && error("Invalid area: \"$area_str\". Valid options are SE1, SE2, SE3, SE4.")
+
     (; profiles, facility_df) = read_input_data()
 
     # Retrieve all profile column names
@@ -101,7 +143,7 @@ function runmodel()
 
     output_path  = raw"C:\Users\corte\Documents\REGAL_ToyModel\Output"
     # output_file  = joinpath(output_path, "ToyModelHH_results_all.csv")  # not used for now
-    netload_file = joinpath(output_path, "ToyModelHH_netload.csv")
+    netload_file = joinpath(output_path, "ToyModelHH_netload_$(area).csv")
 
     # isfile(output_file)  && rm(output_file)   # not used for now
     isfile(netload_file) && rm(netload_file)
@@ -127,7 +169,7 @@ function runmodel()
 
         println("Running: load=$(load_p)  |  fuse=$(fuse_size)A  |  bess=$(bess_type)  |  gen=$(gen_p)")
 
-        ToyModelHH, params, vars, constraints = makemodel(Symbol(load_p), Symbol(gen_p), bess_type)
+        ToyModelHH, params, vars, constraints = makemodel(Symbol(load_p), Symbol(gen_p), bess_type, area)
 
         (; loadHH, genPV) = params
         (; Buy, Sell, NetloadHH, ChargeBESS, DischargeBESS, SocBESS, HHcost) = vars

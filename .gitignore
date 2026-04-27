@@ -4,3 +4,4 @@ Plots/
 *.csv
 *.xlsx
 Manifest.toml
+workspace.jl
