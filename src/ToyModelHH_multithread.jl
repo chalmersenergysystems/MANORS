@@ -1,4 +1,4 @@
-using JuMP, HiGHS, PrettyTables, CSV, DataFrames
+using JuMP, HiGHS, Gurobi, PrettyTables, CSV, DataFrames
 const AxisArray = Containers.DenseAxisArray
 
 include(joinpath(@__DIR__, "ToyModelHH_loop.jl"))
@@ -9,6 +9,14 @@ function runmodel_multithread()
     area_str = strip(readline())
     area = Symbol(area_str)
     area ∉ (:SE1, :SE2, :SE3, :SE4) && error("Invalid area: \"$area_str\". Valid options are SE1, SE2, SE3, SE4.")
+
+    # Prompt for solver selection
+    print("Enter solver (HiGHS vs Gurobi): ")
+    solver_str = strip(readline())
+    solver = Symbol(solver_str)
+    solver ∉ (:HiGHS, :Gurobi) && error("Invalid solver: \"$solver_str\". Valid options are HiGHS, Gurobi.")
+    
+    println("Running for $area with solver $solver")
 
     (; price, profiles, facility_df) = read_input_data()
     tariff_tables = read_input_tables()
@@ -41,7 +49,7 @@ function runmodel_multithread()
 
     output_path  = raw"C:\Users\corte\Documents\REGAL_ToyModel\Output"
     # output_file  = joinpath(output_path, "ToyModelHH_results_all_mt.csv")  # not used for now
-    netload_file = joinpath(output_path, "ToyModelHH_netload_$(area)_mt.csv")
+    netload_file = joinpath(output_path, "ToyModelHH_netload_$(area)_synth.csv")
 
     # isfile(output_file)  && rm(output_file)   # not used for now
     isfile(netload_file) && rm(netload_file)
@@ -63,16 +71,29 @@ function runmodel_multithread()
                 println("[batch $batch_num/$n_batches | run $i/$n_combinations | thread $(Threads.threadid())]  Starting: load=$load_p  bess=$bess_type  gen=$gen_p")
             end
 
-            ToyModelHH, params, vars, constraints = makemodel(load_p, gen_p, bess_type, area, price, profiles, tariff_tables)
+            ToyModelHH, params, vars, constraints = makemodel(load_p, gen_p, bess_type, area, solver, price, profiles, tariff_tables)
 
             (; TIME) = params
             (; NetloadHH, HHcost) = vars
 
             optimize!(ToyModelHH)
+            status = termination_status(ToyModelHH)
 
-            if termination_status(ToyModelHH) != MOI.OPTIMAL
+            if status != MOI.OPTIMAL
+                # Attempt to compute IIS for infeasibility diagnosis
+                compute_conflict!(ToyModelHH)
+
+                # If conflict found, save IIS model to file for debugging
+                if get_attribute(ToyModelHH, MOI.ConflictStatus()) == MOI.CONFLICT_FOUND
+                    iis_model, _ = copy_conflict(ToyModelHH)
+                    lock(print_lock) do
+                        print(iis_model)
+                    end
+                end
+
+                # Print warning and skip saving results for this combination
                 lock(print_lock) do
-                    @warn "[batch $batch_num/$n_batches | run $i/$n_combinations]  Not optimal for load=$load_p, gen=$gen_p. Skipping."
+                    @warn "[batch $batch_num/$n_batches | run $i/$n_combinations]  Not optimal ($status) for load=$load_p, gen=$gen_p. Skipping."
                 end
                 results[i] = nothing
                 continue

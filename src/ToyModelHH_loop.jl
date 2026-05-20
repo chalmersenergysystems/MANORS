@@ -1,5 +1,6 @@
-using JuMP, HiGHS, PrettyTables
+using JuMP, HiGHS, Gurobi, PrettyTables
 const AxisArray = Containers.DenseAxisArray
+const GRB_ENV = Gurobi.Env(output_flag = 0)
 
 export makeparameters, makevariables, makeconstraints, makemodel, runmodel, printtable
 
@@ -67,7 +68,7 @@ function makeconstraints(model, vars, params)
     
     @constraints model begin
         BalanceHH[t in TIME],
-            genPV[t] + DischargeBESS[t] + Buy[t] >= loadHH[t] + ChargeBESS[t] + Sell[t]
+            genPV[t] + DischargeBESS[t] + Buy[t] == loadHH[t] + ChargeBESS[t] + Sell[t]                 # alternatively do >=
         
         BalanceBESS[t in TIME[1:end-1]],
             SocBESS[t+1] <= SocBESS[t] + (ChargeBESS[t] * eta_chargeBESS[bess_type]) - (DischargeBESS[t] / eta_dischargeBESS[bess_type]) #- (lossesBESS[bess_type] * SocBESS[t] / TIME[end])
@@ -94,8 +95,32 @@ function makeconstraints(model, vars, params)
     return (; BalanceHH, BalanceBESS, LimitsSocBESS, LimitsChargeBESS, LimitsDischargeBESS, NetloadHHdef, Totalcosts)
 end
 
-function makemodel(load_profile, gen_profile, bess_type, area::Symbol)
-    model = Model(HiGHS.Optimizer)
+function set_solver(solver::Symbol)
+    if solver == :HiGHS
+        return optimizer_with_attributes(
+            HiGHS.Optimizer,
+            "presolve"       => "on",
+            "solver"         => "ipx",
+            "run_crossover"  => "on",
+            "ranging"        => "on",
+        )
+    elseif solver == :Gurobi
+        return optimizer_with_attributes(
+            () -> Gurobi.Optimizer(GRB_ENV),
+            "OutputFlag"     => 0,
+            "BarHomogeneous" => 1,
+            "Crossover"      => 1,
+            "Method"         => 2,
+            "DualReductions" => 0,
+        )
+    else
+        error("Unknown solver: $solver. Valid options are :HiGHS, :Gurobi.")
+    end
+end
+
+function makemodel(load_profile, gen_profile, bess_type, area::Symbol, solver::Symbol)
+    optimizer = set_solver(solver)
+    model = Model(optimizer)
 
     params = makeparameters(load_profile, gen_profile, bess_type, area)
     vars = makevariables(model, params)
@@ -110,8 +135,9 @@ function makemodel(load_profile, gen_profile, bess_type, area::Symbol)
     return model, params, vars, constraints
 end
 
-function makemodel(load_profile, gen_profile, bess_type, area::Symbol, price, profiles, tariff_tables)
-    model = Model(HiGHS.Optimizer)
+function makemodel(load_profile, gen_profile, bess_type, area::Symbol, solver::Symbol, price, profiles, tariff_tables)
+    optimizer = set_solver(solver)
+    model = Model(optimizer)
     set_silent(model)
 
     params      = makeparameters(load_profile, gen_profile, bess_type, area, price, profiles, tariff_tables)
@@ -133,6 +159,14 @@ function runmodel()
     area_str = strip(readline())
     area = Symbol(area_str)
     area ∉ (:SE1, :SE2, :SE3, :SE4) && error("Invalid area: \"$area_str\". Valid options are SE1, SE2, SE3, SE4.")
+
+    # Prompt for solver selection
+    print("Enter solver (HiGHS vs Gurobi): ")
+    solver_str = strip(readline())
+    solver = Symbol(solver_str)
+    solver ∉ (:HiGHS, :Gurobi) && error("Invalid solver: \"$solver_str\". Valid options are HiGHS, Gurobi.")
+
+    println("Running for $area with solver $solver")
 
     (; profiles, facility_df) = read_input_data()
 
@@ -169,7 +203,8 @@ function runmodel()
 
         println("Running: load=$(load_p)  |  fuse=$(fuse_size)A  |  bess=$(bess_type)  |  gen=$(gen_p)")
 
-        ToyModelHH, params, vars, constraints = makemodel(Symbol(load_p), Symbol(gen_p), bess_type, area)
+        # ToyModelHH, params, vars, constraints = makemodel(Symbol(load_p), Symbol(gen_p), bess_type, area, solver, price, profiles, tariff_tables)
+        ToyModelHH, params, vars, constraints = makemodel(Symbol(load_p), Symbol(gen_p), bess_type, area, solver)
 
         (; loadHH, genPV) = params
         (; Buy, Sell, NetloadHH, ChargeBESS, DischargeBESS, SocBESS, HHcost) = vars
