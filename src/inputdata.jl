@@ -44,6 +44,13 @@ function df_to_axisarray(df)
     return AxisArray(Matrix(df), row_names, col_names)
 end
 
+gridarea_to_region = Dict(
+    "SE1" => ["Norrbotten"],
+    "SE2" => ["Västerbotten", "Jämtland", "Västernorrland", "Gävleborg"],
+    "SE3" => ["Dalarna", "Värmland", "Örebro", "Västmanland", "Uppsala", "Södermanland", "Stockholm", "VästraGötaland", "Östergötland", "Jönköping", "Gotland"],
+    "SE4" => ["Halland", "Kronoberg", "Kalmar", "Skåne", "Blekinge"]
+)
+
 function read_input_data()
     # Define path
     input_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Input"
@@ -57,32 +64,60 @@ function read_input_data()
     # Read facility metadata
     facility_df = CSV.read(joinpath(input_path, "facility.csv"), DataFrame)
 
-    # Read input data from CSV files
+    # Read consumption profiles from CSV files
     loadAPT_df = CSV.read(joinpath(input_path, "APT_sampled_profiles_merged.csv"), DataFrame)
     loadHH_df = CSV.read(joinpath(input_path, "HH_sampled_profiles_merged.csv"), DataFrame)
-    genPV_df = CSV.read(joinpath(input_path, "pv_profiles_filtered.csv"), DataFrame)
-    genPVapt_df = CSV.read(joinpath(input_path, "pv_profiles_filtered_apt.csv"), DataFrame)
-    genPVhh_df = CSV.read(joinpath(input_path, "pv_profiles_filtered_best.csv"), DataFrame)
 
     # Clean up dataframes
     loadAPT_df = df_cleanup!(loadAPT_df)
     loadHH_df = df_cleanup!(loadHH_df)
-    genPV_df = df_cleanup!(genPV_df)
-    genPVapt_df = df_cleanup!(genPVapt_df)
-    genPVhh_df = df_cleanup!(genPVhh_df)
-    
+
     # Convert to AxisArrays
     loadAPT = df_to_axisarray(loadAPT_df)
     loadHH = df_to_axisarray(loadHH_df)
-    genPV = df_to_axisarray(genPV_df)
-    genPVapt = df_to_axisarray(genPVapt_df)
-    genPVhh = df_to_axisarray(genPVhh_df)
 
     # Collect data for return
     price = (; SE1=Array(elprice_df."SE1"), SE2=Array(elprice_df."SE2"), SE3=Array(elprice_df."SE3"), SE4=Array(elprice_df."SE4"))
-    profiles = (; loadAPT, loadHH, genPVapt, genPVhh)
+    profiles = (; loadAPT, loadHH)
 
     return (; price, profiles, facility_df)
+end
+
+function read_PV_data(area::Symbol)
+    # Define path
+    input_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Input"
+    synth_path = joinpath(input_path, "synth_profiles")
+
+    # Read generation profiles from CSV files
+    regions = gridarea_to_region[String(area)]
+    area_df = nothing
+    for region in regions
+        filepath = joinpath(synth_path, "pv_profiles_$(region).csv")
+        if !isfile(filepath)
+            @warn "No PV profile found for region $region, skipping."
+            continue
+        end
+        region_df = CSV.read(filepath, DataFrame)
+        # Rename profile columns: original_colname → original_colname_region
+        data_cols = [c for c in names(region_df) if c ∉ ("id_timestamp", "time")]
+        for col in data_cols
+            rename!(region_df, col => "$(col)_$(region)")
+        end
+        if isnothing(area_df)
+            area_df = region_df
+        else
+            area_df = hcat(area_df, region_df[!, ["$(col)_$(region)" for col in data_cols]])
+        end
+    end
+    isnothing(area_df) && error("No PV profiles found for any region in $area.")
+
+    # Clean up dataframe
+    genPV_df = df_cleanup!(area_df)
+
+    # Convert to AxisArrays
+    genPV_df = df_to_axisarray(genPV_df)
+
+    return genPV_df
 end
 
 readrow(table, rownum, headings) = NamedTuple(h => table[rownum, i+1] for (i, h) in enumerate(headings))    # +1 to ignore the first table column
@@ -110,6 +145,9 @@ end
 
 const FUSE_TO_BESS = Dict(16 => :BESS6, 20 => :BESS10, 25 => :BESS13, 35 => :BESS20)
 
+# const FUSE_TO_POWER = Dict(16 => 11.0, 20 => 14.0, 25 => 17.0, 35 => 24.0)   # approximate max power in kW for each fuse size, https://partilleenergi.se/en/faq/vilket-effektuttag-kan-jag-ha-pa-min-huvudsakring/
+const BESS_TO_POWER = Dict(:BESS6 => 11.0, :BESS10 => 14.0, :BESS13 => 17.0, :BESS20 => 24.0)   # max power in kW for the house
+
 function fuse_to_bess(fuse_size)
     bess = get(FUSE_TO_BESS, Int(fuse_size), nothing)
     if isnothing(bess)
@@ -118,8 +156,19 @@ function fuse_to_bess(fuse_size)
     return bess
 end
 
-# Placeholder: returns all genPVhh profile IDs as a single flat pool.
+# function fuse_to_power(fuse_size)
+#     maxpower = get(FUSE_TO_POWER, Int(fuse_size), nothing)
+#     if isnothing(maxpower)
+#         error("No power mapping defined for fuse size $(fuse_size)A. Known sizes: $(sort(collect(keys(FUSE_TO_POWER))))A")
+#     end
+#     return maxpower
+# end
+
+# Placeholder: returns all genPV profile IDs as a single flat pool.
 # Replace this function to partition profiles by fuse size or PV peak power.
-function build_genPV_pools(genPVhh_profiles)
-    return genPVhh_profiles
+function build_genPV_pools(genPV_profiles)
+    return genPV_profiles
 end
+
+# Select seed for reproducibility. Note: this is set once at the start of the program, not per profile, to ensure different random draws across profiles while still being reproducible.
+const RANDOM_SEED = 18

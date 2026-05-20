@@ -1,4 +1,4 @@
-using JuMP, HiGHS, Gurobi, PrettyTables
+using JuMP, HiGHS, Gurobi, PrettyTables, Random
 const AxisArray = Containers.DenseAxisArray
 const GRB_ENV = Gurobi.Env(output_flag = 0)
 
@@ -6,8 +6,11 @@ export makeparameters, makevariables, makeconstraints, makemodel, runmodel, prin
 
 include(joinpath(@__DIR__, "inputdata.jl"))
 
+# Standalone variant: reads all input data internally.
+# Use for single interactive model runs (e.g. called directly from makemodel/runmodel).
 function makeparameters(load_profile, gen_profile, bess_type, area::Symbol)
     (; price, profiles) = read_input_data()
+    genPV_data = read_PV_data(area)
     (; tariffparameters, batteryparameters) = read_input_tables()
 
     # --- Model sets ---
@@ -16,17 +19,21 @@ function makeparameters(load_profile, gen_profile, bess_type, area::Symbol)
     BESS = [:BESS6, :BESS10, :BESS13, :BESS20]
 
     # --- Model parameters ---
-    elprice = getproperty(price, area)[TIME]             # €/MWh, 15-min resolution
-    loadHH = profiles.loadHH[TIME, load_profile]        # kWh/15-min
-    genPV = profiles.genPVhh[TIME, gen_profile]         # kWh/15-min
+    elprice = getproperty(price, area)[TIME]                            # €/MWh, 15-min resolution
+    loadHH = profiles.loadHH[TIME, load_profile]                        # kWh/15-min
+    genPV = genPV_data[TIME, gen_profile]                               # kWh/15-min
 
     tariffHH, _, compensationPV = readtable(tariffparameters, AREA)
 
     sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS = readtable(batteryparameters, BESS)
 
-    return (; TIME, AREA, area, bess_type, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS)
+    maxpower = BESS_TO_POWER[bess_type]
+
+    return (; TIME, AREA, area, bess_type, maxpower, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS)
 end
 
+# Batch variant: receives pre-loaded data (price, profiles with genPV, tariff_tables).
+# Use for multithreaded/loop runs where data is loaded once outside the loop.
 function makeparameters(load_profile, gen_profile, bess_type, area::Symbol, price, profiles, tariff_tables)
     (; tariffparameters, batteryparameters) = tariff_tables
 
@@ -36,14 +43,16 @@ function makeparameters(load_profile, gen_profile, bess_type, area::Symbol, pric
     BESS = [:BESS6, :BESS10, :BESS13, :BESS20]
 
     # --- Model parameters ---
-    elprice     = getproperty(price, area)[TIME]        # €/MWh, 15-min resolution
-    loadHH      = profiles.loadHH[TIME, load_profile]   # kWh/15-min
-    genPV       = profiles.genPVhh[TIME, gen_profile]   # kWh/15-min
+    elprice = getproperty(price, area)[TIME]                            # €/MWh, 15-min resolution
+    loadHH = profiles.loadHH[TIME, load_profile]                        # kWh/15-min
+    genPV = profiles.genPV[TIME, gen_profile]                               # kWh/15-min
 
     tariffHH, _, compensationPV = readtable(tariffparameters, AREA)
     sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS = readtable(batteryparameters, BESS)
 
-    return (; TIME, AREA, area, bess_type, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS)
+    maxpower = BESS_TO_POWER[bess_type]
+
+    return (; TIME, AREA, area, bess_type, maxpower, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS)
 end
 
 function makevariables(model, params)
@@ -63,36 +72,39 @@ function makevariables(model, params)
 end
 
 function makeconstraints(model, vars, params)
-    (; TIME, area, bess_type, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS) = params
+    (; TIME, area, bess_type, maxpower, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS) = params
     (; HHcost, Buy, Sell, NetloadHH, ChargeBESS, DischargeBESS, SocBESS) = vars
     
     @constraints model begin
         BalanceHH[t in TIME],
             genPV[t] + DischargeBESS[t] + Buy[t] == loadHH[t] + ChargeBESS[t] + Sell[t]                 # alternatively do >=
-        
-        BalanceBESS[t in TIME[1:end-1]],
-            SocBESS[t+1] <= SocBESS[t] + (ChargeBESS[t] * eta_chargeBESS[bess_type]) - (DischargeBESS[t] / eta_dischargeBESS[bess_type]) #- (lossesBESS[bess_type] * SocBESS[t] / TIME[end])
 
-        LoopBESS,
-            SocBESS[1] == SocBESS[end]
+        BalanceBESS[t in TIME],
+            SocBESS[t == TIME[end] ? TIME[1] : t+1] <= SocBESS[t] + (ChargeBESS[t] * eta_chargeBESS[bess_type]) - (DischargeBESS[t] / eta_dischargeBESS[bess_type])
 
         LimitsSocBESS[t in TIME],
             SocBESS[t] <= sizeBESS[bess_type]
 
-        LimitsChargeBESS[t in TIME], # kWh/15-min
-            ChargeBESS[t] <= sizeBESS[bess_type] * rateBESS[bess_type] / 4
+        LimitsChargeBESS[t in TIME],
+            ChargeBESS[t] <= sizeBESS[bess_type] * rateBESS[bess_type] / 4      # kWh/15-min
         
-        LimitsDischargeBESS[t in TIME], # kWh/15-min
-            DischargeBESS[t] <= sizeBESS[bess_type] * rateBESS[bess_type] / 4
+        LimitsDischargeBESS[t in TIME],
+            DischargeBESS[t] <= sizeBESS[bess_type] * rateBESS[bess_type] / 4   # kWh/15-min
 
         NetloadHHdef[t in TIME],
             NetloadHH[t] == Buy[t] - Sell[t]
+
+        MaxPowerIn[t in TIME],
+            Buy[t] <= maxpower / 4      # kWh/15-min
+
+        MaxPowerOut[t in TIME],     
+            Sell[t] <= maxpower / 4     # kWh/15-min
 
         Totalcosts,
             HHcost == sum(Buy[t] * (elprice[t] + tariffHH[area]) for t in TIME) - sum(Sell[t] * (elprice[t] + compensationPV[area]) for t in TIME)
     end
 
-    return (; BalanceHH, BalanceBESS, LimitsSocBESS, LimitsChargeBESS, LimitsDischargeBESS, NetloadHHdef, Totalcosts)
+    return (; BalanceHH, BalanceBESS, LimitsSocBESS, LimitsChargeBESS, LimitsDischargeBESS, NetloadHHdef, MaxPowerIn, MaxPowerOut, Totalcosts)
 end
 
 function set_solver(solver::Symbol)
@@ -118,6 +130,8 @@ function set_solver(solver::Symbol)
     end
 end
 
+# Standalone variant: reads all input data internally via the standalone makeparameters.
+# Use for single interactive runs.
 function makemodel(load_profile, gen_profile, bess_type, area::Symbol, solver::Symbol)
     optimizer = set_solver(solver)
     model = Model(optimizer)
@@ -135,6 +149,8 @@ function makemodel(load_profile, gen_profile, bess_type, area::Symbol, solver::S
     return model, params, vars, constraints
 end
 
+# Batch variant: receives pre-loaded data and passes it to the batch makeparameters.
+# Use for multithreaded/loop runs (runmodel, runmodel_multithread).
 function makemodel(load_profile, gen_profile, bess_type, area::Symbol, solver::Symbol, price, profiles, tariff_tables)
     optimizer = set_solver(solver)
     model = Model(optimizer)
@@ -168,12 +184,14 @@ function runmodel()
 
     println("Running for $area with solver $solver")
 
-    (; profiles, facility_df) = read_input_data()
+    (; price, profiles, facility_df) = read_input_data()
+    tariff_tables = read_input_tables()
+    genPV    = read_PV_data(area)                                # ← add
+    profiles = (; profiles..., genPV) 
 
-    # Retrieve all profile column names
+    # Extract profile names and available regions for user selection
     load_profiles = collect(Base.axes(profiles.loadHH, 2))
-    gen_profiles  = collect(Base.axes(profiles.genPVhh, 2))
-    gen_pool = build_genPV_pools(gen_profiles)
+    all_gen_profiles = collect(Base.axes(profiles.genPV, 2))
 
     output_path  = raw"C:\Users\corte\Documents\REGAL_ToyModel\Output"
     # output_file  = joinpath(output_path, "ToyModelHH_results_all.csv")  # not used for now
@@ -198,13 +216,15 @@ function runmodel()
         fuse_size = facility_row[1, :contract_fuse_size]
         bess_type = fuse_to_bess(fuse_size)
 
-        # Draw one genPV profile at random from the pool (placeholder until pools are defined)
-        gen_p = rand(gen_pool)
+        # Draw one genPV profile at random from all regions in the area.
+        # Note: unlike runmodel_multithread, runmodel has no region prompt and draws
+        # from the full area pool. Add a region prompt here if region-level separation is needed.
+        Random.seed!(RANDOM_SEED)
+        gen_p = rand(all_gen_profiles)
 
         println("Running: load=$(load_p)  |  fuse=$(fuse_size)A  |  bess=$(bess_type)  |  gen=$(gen_p)")
 
-        # ToyModelHH, params, vars, constraints = makemodel(Symbol(load_p), Symbol(gen_p), bess_type, area, solver, price, profiles, tariff_tables)
-        ToyModelHH, params, vars, constraints = makemodel(Symbol(load_p), Symbol(gen_p), bess_type, area, solver)
+        ToyModelHH, params, vars, constraints = makemodel(Symbol(load_p), Symbol(gen_p), bess_type, area, solver, price, profiles, tariff_tables)
 
         (; loadHH, genPV) = params
         (; Buy, Sell, NetloadHH, ChargeBESS, DischargeBESS, SocBESS, HHcost) = vars
