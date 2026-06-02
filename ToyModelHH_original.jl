@@ -17,7 +17,7 @@ function makeparameters()
     # --- Model parameters ---
     elprice2030 = price.present[TIME]                   # €/MWh, 15-min resolution
     loadHH = profiles.loadHH[TIME, :profile_17]         # kWh/15-min
-    genPV = profiles.genPVhh[TIME, :profile_15]         # kWh/15-min
+    genPV = profiles.genPV[TIME, :profile_15]         # kWh/15-min
 
     tariffHH, _, compensationPV = readtable(tariffparameters, AREA)
 

@@ -1,5 +1,6 @@
-using DataFrames, CSV, XLSX, AxisArrays
+using DataFrames, CSV, XLSX, AxisArrays, JSON3
 
+# Select electricity price data for the 4 Swedish bidding areas
 function prepare_elprice(df, ordered_timestamp)
     område = ["SE1", "SE2", "SE3", "SE4"]
     sweden = filter(row -> row.MapCode in område, df)
@@ -15,6 +16,17 @@ function prepare_elprice(df, ordered_timestamp)
     return elprice
 end
 
+function filter_ev_data(df::DataFrame, id_col::Symbol, good_ids::Vector{String})
+    col = id_col isa Symbol ? id_col : Symbol(id_col)
+    if col ∉ propertynames(df)
+        valid = filter(id -> Symbol(id) ∈ propertynames(df), good_ids)
+        return select(df, :id_timestamp, Symbol.(valid)...)
+    else
+        return filter(row -> row[col] in good_ids, df)
+    end
+end
+
+# Clean up dataframes
 function df_cleanup!(df)
     # Define columns to keep
     if "id_timestamp" in names(df)
@@ -31,6 +43,7 @@ function df_cleanup!(df)
     select!(df, :time, cols_to_keep...)
 end
 
+# Convert cleaned dataframes to AxisArrays for easier indexing in the model
 function df_to_axisarray(df)
     row_names = df[!, 1]
     # Remove redundant hour column to avoid sorting issues when we take Matrix(df).
@@ -44,6 +57,7 @@ function df_to_axisarray(df)
     return AxisArray(Matrix(df), row_names, col_names)
 end
 
+# Map grid areas to regions for profile selection
 gridarea_to_region = Dict(
     "SE1" => ["Norrbotten"],
     "SE2" => ["Västerbotten", "Jämtland", "Västernorrland", "Gävleborg"],
@@ -51,6 +65,7 @@ gridarea_to_region = Dict(
     "SE4" => ["Halland", "Kronoberg", "Kalmar", "Skåne", "Blekinge"]
 )
 
+# Read input data: electricity prices, load profiles, facility metadata
 function read_input_data()
     # Define path
     input_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Input"
@@ -83,6 +98,7 @@ function read_input_data()
     return (; price, profiles, facility_df)
 end
 
+# Read PV profiles for the selected gridarea (MULTITHREAD)
 function read_PV_data(area::Symbol)
     # Define path
     input_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Input"
@@ -111,18 +127,79 @@ function read_PV_data(area::Symbol)
     end
     isnothing(area_df) && error("No PV profiles found for any region in $area.")
 
-    # Clean up dataframe
+    # Clean up and convert to AxisArray
     genPV_df = df_cleanup!(area_df)
-
-    # Convert to AxisArrays
     genPV_df = df_to_axisarray(genPV_df)
 
     return genPV_df
 end
 
+# Read PV profiles for the selected region (SINGLE RUN)
+function read_PV_data(region::String)
+    # Define path
+    input_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Input"
+    synth_path = joinpath(input_path, "synth_profiles")
+
+    filepath = joinpath(synth_path, "pv_profiles_$(region).csv")
+    isfile(filepath) || error("No PV profile found for region \"$region\".")
+
+    region_df = CSV.read(filepath, DataFrame)
+
+    # Clean up and convert to AxisArray
+    genPV_df = df_cleanup!(region_df)
+    genPV_df = df_to_axisarray(genPV_df)
+
+    return genPV_df
+end
+
+# Read EV input data
+function read_EV_data()
+    # Define path
+    input_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Input"
+    ev_folder = joinpath(input_path, "ev_data")
+
+    # Read EV data
+    battery_cap = CSV.read(joinpath(ev_folder, "battery_cap.csv"), DataFrame)
+    homeshare = CSV.read(joinpath(ev_folder, "homeshare_ep.csv"), DataFrame)
+    tripenergy = CSV.read(joinpath(ev_folder, "tripenergy_ep.csv"), DataFrame)
+    chargeenergy = CSV.read(joinpath(ev_folder, "chargeenergy_ep.csv"), DataFrame)
+
+    # Select only good data
+    good_ids = JSON3.read(read(joinpath(ev_folder, "EVs_charging_at_home.txt"), String), Vector{String})
+    battery_cap = filter_ev_data(battery_cap, :id, good_ids)
+    homeshare = filter_ev_data(homeshare, :id, good_ids)
+    tripenergy = filter_ev_data(tripenergy, :id, good_ids)
+    chargeenergy = filter_ev_data(chargeenergy, :id, good_ids)
+
+    # Fix driving demand data. Note: original data is negative for energy consumed
+    for col in names(tripenergy)
+        col ∈ ("id_timestamp", "time") && continue
+        tripenergy[!, col] = abs.(min.(tripenergy[!, col], 0.0))   # keep negatives, zero out positives, then abs
+    end
+    # Converted to positive values representing energy consumed
+
+    # Clean up dataframes
+    homeshare = df_cleanup!(homeshare)
+    tripenergy = df_cleanup!(tripenergy)
+    chargeenergy = df_cleanup!(chargeenergy)
+
+    # Convert to AxisArrays
+    homeshare = df_to_axisarray(homeshare)
+    tripenergy = df_to_axisarray(tripenergy)
+    chargeenergy = df_to_axisarray(chargeenergy)
+
+    # EV parameters
+    charger_power = 22                     # kW, choose between 6.9 kW (10A), 11 kW (16A) or 22 kW (32A), ref: https://www.evify.se/produkter/laddboxar/
+    cost_public_charge = 560.0              # €/MWh, based on average public charging prices in Sweden, ref: https://alternative-fuels-observatory.ec.europa.eu/markets-and-policy/market-and-consumer-insights/electric-vehicle-recharging-prices
+    eta_chargeEV = 0.95                     # charging efficiency, for V2G option: discharging efficiency defined in makeparameters() as eta_dischargeEV = eta_chargeEV
+
+    return (; battery_cap, homeshare, tripenergy, chargeenergy, charger_power, cost_public_charge, eta_chargeEV)
+end
+
 readrow(table, rownum, headings) = NamedTuple(h => table[rownum, i+1] for (i, h) in enumerate(headings))    # +1 to ignore the first table column
 readtable(table, headings) = Tuple(readrow(table, i, headings) for i = 1:size(table,1))
 
+# Define tariff and battery parameters
 function read_input_tables()
     tariffparameters = [
     #                   SE1     SE2     SE3     SE4
@@ -132,22 +209,27 @@ function read_input_tables()
     ]
 
     batteryparameters = [
-    #                      BESS6  BESS10  BESS13  BESS20
-    :sizeBESS                6.6    10.0    13.3    20.0     # kWh
-    :rateBESS                1.0     1.0     0.5     1.0     # C-rate
-    :eta_chargeBESS         0.95    0.95    0.95    0.95     # charging efficiency
-    :eta_dischargeBESS      0.95    0.95    0.95    0.95     # charging efficiency
-    # :lossesBESS             0.01    0.01    0.01    0.01     # self-discharge loss per year
+    #                      BESS6  BESS10  BESS14  BESS20     
+    :sizeBESS                6.0    10.0    14.0    20.0        # kWh
+    :rateBESS               0.83    0.75    0.67    0.67        # C-rate
+    :eta_chargeBESS         0.95    0.95    0.95    0.95        # charging efficiency
+    :eta_dischargeBESS      0.95    0.95    0.95    0.95        # discharging efficiency
+    :dodBESS                0.95    0.95    0.95    0.95        # depth of discharge, i.e., usable capacity as % of total capacity
+    :costBESS                440     360     330     280        # €/kWh, with Grönt Avdrag (50% subsidy) capped at 100000 SEK (50000 SEK per person)
+    :n_cyclesBESS           6000    6000    6000    6000        # number of charge/discharge cycles
+    :lifetimeBESS             10      10      10      10        # years
+    :sohBESS                 0.6     0.6     0.6     0.6        # state of health at end of life, i.e., remaining capacity as % of original capacity after n_cycles or lifetime, whichever comes first
     ]
 
     return (; tariffparameters, batteryparameters)
 end
 
-const FUSE_TO_BESS = Dict(16 => :BESS6, 20 => :BESS10, 25 => :BESS13, 35 => :BESS20)
+# Map fuse size to BESS type and max power
+const FUSE_TO_BESS = Dict(16 => :BESS6, 20 => :BESS10, 25 => :BESS14, 35 => :BESS20)
+# const FUSE_TO_POWER = Dict(16 => 11.0, 20 => 14.0, 25 => 17.0, 35 => 24.0)   # approximate max power in kW for each fuse size, ref: https://partilleenergi.se/en/faq/vilket-effektuttag-kan-jag-ha-pa-min-huvudsakring/
+const BESS_TO_POWER = Dict(:BESS6 => 11.0, :BESS10 => 14.0, :BESS14 => 17.0, :BESS20 => 24.0)   # max power in kW for the house
 
-# const FUSE_TO_POWER = Dict(16 => 11.0, 20 => 14.0, 25 => 17.0, 35 => 24.0)   # approximate max power in kW for each fuse size, https://partilleenergi.se/en/faq/vilket-effektuttag-kan-jag-ha-pa-min-huvudsakring/
-const BESS_TO_POWER = Dict(:BESS6 => 11.0, :BESS10 => 14.0, :BESS13 => 17.0, :BESS20 => 24.0)   # max power in kW for the house
-
+# Map fuse size to BESS type. Note: this is a simplified mapping for demonstration purposes. In reality, the appropriate BESS size would depend on the specific load profile, PV generation, and other factors.
 function fuse_to_bess(fuse_size)
     bess = get(FUSE_TO_BESS, Int(fuse_size), nothing)
     if isnothing(bess)
@@ -169,6 +251,9 @@ end
 function build_genPV_pools(genPV_profiles)
     return genPV_profiles
 end
+
+# Define conversion factor from kWh to MWh for cost calculations
+const kWh_to_MWh = 1 / 1000
 
 # Select seed for reproducibility. Note: this is set once at the start of the program, not per profile, to ensure different random draws across profiles while still being reproducible.
 const RANDOM_SEED = 18
