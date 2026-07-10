@@ -1,7 +1,7 @@
 using JuMP, HiGHS, Gurobi, PrettyTables, CSV, DataFrames, Random
 const AxisArray = Containers.DenseAxisArray
 
-include(joinpath(@__DIR__, "ToyModelHH_loop.jl"))
+include(joinpath(@__DIR__, "GridHome_loop.jl"))
 
 function runmodel_multithread()
     # Prompt for area selection
@@ -73,7 +73,6 @@ function runmodel_multithread()
         for region in selected_regions
             region_pool = [p for p in all_gen_profiles if endswith(String(p), "_$(region)")]
             isempty(region_pool) && (@warn "No gen profiles found for region $region. Skipping."; continue)
-            Random.seed!(RANDOM_SEED)
             gen_p = rand(region_pool)
             push!(tasks, (Symbol(load_p), Symbol(gen_p), bess_type, region))
         end
@@ -84,7 +83,7 @@ function runmodel_multithread()
     n_batches      = ceil(Int, n_combinations / n_threads)
     println("Total combinations: $n_combinations  |  Threads: $n_threads  |  Batches: ~$n_batches")
 
-    output_path  = raw"C:\Users\corte\Documents\REGAL_ToyModel\Output"
+    output_path  = raw"C:\Users\corte\Documents\GridHome\Output"
     results          = Vector{Union{Nothing, Tuple{String, Vector{Float64}}}}(nothing, n_combinations)
     print_lock       = ReentrantLock()
     stop_flag        = Threads.Atomic{Bool}(false)
@@ -102,21 +101,21 @@ function runmodel_multithread()
                 println("[batch $batch_num/$n_batches | run $i/$n_combinations | thread $(Threads.threadid())]  Starting: region=$region load=$load_p  bess=$bess_type  gen=$gen_p")
             end
 
-            ToyModelHH, params, vars, constraints = makemodel(load_p, gen_p, bess_type, area, solver, price, profiles, tariff_tables)
+            model, params, vars, constraints = makemodel(load_p, gen_p, bess_type, area, solver, price, profiles, tariff_tables)
 
             (; TIME) = params
-            (; NetloadHH, HHcost) = vars
+            (; TotCost) = vars
 
-            optimize!(ToyModelHH)
-            status = termination_status(ToyModelHH)
+            optimize!(model)
+            status = termination_status(model)
 
             if status != MOI.OPTIMAL
                 # Attempt to compute IIS for infeasibility diagnosis
-                compute_conflict!(ToyModelHH)
+                compute_conflict!(model)
 
                 # If conflict found, save IIS model to file for debugging
-                if get_attribute(ToyModelHH, MOI.ConflictStatus()) == MOI.CONFLICT_FOUND
-                    iis_model, _ = copy_conflict(ToyModelHH)
+                if get_attribute(model, MOI.ConflictStatus()) == MOI.CONFLICT_FOUND
+                    iis_model, _ = copy_conflict(model)
                     lock(print_lock) do
                         print(iis_model)
                     end
@@ -131,8 +130,8 @@ function runmodel_multithread()
             end
 
             run_label    = "run_$(i)_load$(load_p)_bess$(bess_type)_gen$(gen_p)"
-            netload_vals = [round(value(NetloadHH[t]), digits=4) for t in TIME]
-            total_cost   = round(value(HHcost),         digits=4)
+            netload_vals = [round(value(Netload[t]), digits=4) for t in TIME]
+            total_cost   = round(value(TotCost),         digits=4)
 
             # # Full results: each thread builds its own case_df and appends to file
             # load_vals      = [round(value(loadHH[t]),           digits=4) for t in TIME]
@@ -194,7 +193,7 @@ function runmodel_multithread()
                     println("No results for region $region, skipping.")
                     continue
                 end
-                netload_file = joinpath(output_path, "ToyModelHH_netload_$(region)_synth.csv")
+                netload_file = joinpath(output_path, "GridHome_netload_$(region).csv")
                 netload_df   = DataFrame(time = collect(1:35040))
                 for i in region_indices
                     run_label, netload_vals = results[i]

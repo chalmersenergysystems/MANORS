@@ -27,9 +27,12 @@ function makeparameters(load_profile, gen_profile, bess_type, area::Symbol)
 
     sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS = readtable(batteryparameters, BESS)
 
-    maxpower = BESS_TO_POWER[bess_type]
+    # Household parameters
+    # maxpower = FUSE_TO_POWER[fuse_size]             # kW, add 20 kW to ensure no infeasibility due to the fuse limit (since we want to analyze the effect of the EV without fuse limitations)
+    maxpower = fuse_size * FUSE_TO_POWER_FACTOR     # kW, current (A) * tri-phase * voltage (kV)
+    overload_tol = 0.10                             # overload tolerance
 
-    return (; TIME, AREA, area, bess_type, maxpower, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS)
+    return (; TIME, AREA, area, bess_type, maxpower, overload_tol, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS)
 end
 
 # Batch variant: receives pre-loaded data (price, profiles with genPV, tariff_tables).
@@ -50,30 +53,32 @@ function makeparameters(load_profile, gen_profile, bess_type, area::Symbol, pric
     tariffHH, _, compensationPV = readtable(tariffparameters, AREA)
     sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS = readtable(batteryparameters, BESS)
 
-    maxpower = BESS_TO_POWER[bess_type]
+    # Household parameters
+    # maxpower = FUSE_TO_POWER[fuse_size]             # kW, add 20 kW to ensure no infeasibility due to the fuse limit (since we want to analyze the effect of the EV without fuse limitations)
+    maxpower = fuse_size * FUSE_TO_POWER_FACTOR     # kW, current (A) * tri-phase * voltage (kV)
+    overload_tol = 0.10                             # overload tolerance
 
-    return (; TIME, AREA, area, bess_type, maxpower, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS)
+    return (; TIME, AREA, area, bess_type, maxpower, overload_tol, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS)
 end
 
 function makevariables(model, params)
-    (; TIME) = params
+    (; TIME, bess_type) = params
 
     @variables model begin
-        HHcost                                  # Mkr/year
-        Buy[t in TIME] >= 0                     # kWh/15-min
-        Sell[t in TIME] >= 0                    # kWh/15-min
-        NetloadHH[t in TIME]                    # kWh/15-min, positive means net load, negative means net generation
-        ChargeBESS[t in TIME] >= 0              # kW
-        DischargeBESS[t in TIME] >= 0           # kW
-        SocBESS[t in TIME] >= 0                 # kWh
+        TotCost                                                                     # €/year
+        0 <= Buy[t in TIME]            <= maxpower / 4 * (1 + overload_tol)         # kWh/15-min
+        0 <= Sell[t in TIME]           <= maxpower / 4 * (1 + overload_tol)         # kWh/15-min
+        0 <= ChargeBESS[t in TIME]                                                  # kW
+        0 <= DischargeBESS[t in TIME]                                               # kW
+        0 <= SocBESS[t in TIME]        <= sizeBESS[bess_type]                       # kWh
     end
 
-    return (; HHcost, Buy, Sell, NetloadHH, ChargeBESS, DischargeBESS, SocBESS)
+    return (; TotCost, Buy, Sell, ChargeBESS, DischargeBESS, SocBESS)
 end
 
 function makeconstraints(model, vars, params)
     (; TIME, area, bess_type, maxpower, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS) = params
-    (; HHcost, Buy, Sell, NetloadHH, ChargeBESS, DischargeBESS, SocBESS) = vars
+    (; TotCost, Buy, Sell, ChargeBESS, DischargeBESS, SocBESS) = vars
     
     @constraints model begin
         BalanceHH[t in TIME],
@@ -82,29 +87,19 @@ function makeconstraints(model, vars, params)
         BalanceBESS[t in TIME],
             SocBESS[t == TIME[end] ? TIME[1] : t+1] <= SocBESS[t] + (ChargeBESS[t] * eta_chargeBESS[bess_type]) - (DischargeBESS[t] / eta_dischargeBESS[bess_type])
 
-        LimitsSocBESS[t in TIME],
-            SocBESS[t] <= sizeBESS[bess_type]
-
-        LimitsChargeBESS[t in TIME],
+        LimitChargeBESS[t in TIME],
             ChargeBESS[t] <= sizeBESS[bess_type] * rateBESS[bess_type] / 4      # kWh/15-min
         
-        LimitsDischargeBESS[t in TIME],
+        LimitDischargeBESS[t in TIME],
             DischargeBESS[t] <= sizeBESS[bess_type] * rateBESS[bess_type] / 4   # kWh/15-min
 
-        NetloadHHdef[t in TIME],
-            NetloadHH[t] == Buy[t] - Sell[t]
-
-        MaxPowerIn[t in TIME],
-            Buy[t] <= maxpower / 4      # kWh/15-min
-
-        MaxPowerOut[t in TIME],     
-            Sell[t] <= maxpower / 4     # kWh/15-min
-
         Totalcosts,
-            HHcost == sum(Buy[t] * (elprice[t] + tariffHH[area]) for t in TIME) - sum(Sell[t] * (elprice[t] + compensationPV[area]) for t in TIME)
+            TotCost == sum(Buy[t] * (elprice[t] + tariffHH[area]) for t in TIME) - sum(Sell[t] * (elprice[t] + compensationPV[area]) for t in TIME)
     end
 
-    return (; BalanceHH, BalanceBESS, LimitsSocBESS, LimitsChargeBESS, LimitsDischargeBESS, NetloadHHdef, MaxPowerIn, MaxPowerOut, Totalcosts)
+    return (; BalanceHH, BalanceBESS, 
+              LimitChargeBESS, LimitDischargeBESS, 
+              Totalcosts)
 end
 
 function set_solver(solver::Symbol)
@@ -140,10 +135,10 @@ function makemodel(load_profile, gen_profile, bess_type, area::Symbol, solver::S
     vars = makevariables(model, params)
     constraints = makeconstraints(model, vars, params)
 
-    (; HHcost) = vars
+    (; TotCost) = vars
 
     @objective model Min begin
-        HHcost
+        TotCost
     end
 
     return model, params, vars, constraints
@@ -160,10 +155,10 @@ function makemodel(load_profile, gen_profile, bess_type, area::Symbol, solver::S
     vars        = makevariables(model, params)
     constraints = makeconstraints(model, vars, params)
 
-    (; HHcost) = vars
+    (; TotCost) = vars
 
     @objective model Min begin
-        HHcost
+        TotCost
     end
 
     return model, params, vars, constraints
@@ -193,9 +188,9 @@ function runmodel()
     load_profiles = collect(Base.axes(profiles.loadHH, 2))
     all_gen_profiles = collect(Base.axes(profiles.genPV, 2))
 
-    output_path  = raw"C:\Users\corte\Documents\REGAL_ToyModel\Output"
-    # output_file  = joinpath(output_path, "ToyModelHH_results_all.csv")  # not used for now
-    netload_file = joinpath(output_path, "ToyModelHH_netload_$(area).csv")
+    output_path  = raw"C:\Users\corte\Documents\GridHome\Output"
+    # output_file  = joinpath(output_path, "GridHome_results_all.csv")  # not used for now
+    netload_file = joinpath(output_path, "GridHome_netload_$(area).csv")
 
     # isfile(output_file)  && rm(output_file)   # not used for now
     isfile(netload_file) && rm(netload_file)
@@ -206,6 +201,7 @@ function runmodel()
     # Initialise the netload DataFrame on the first run
     netload_df = nothing
 
+    Random.seed!(RANDOM_SEED)
     for load_p in load_profiles
         # Look up fuse size and derive BESS type
         facility_row = filter(r -> r.facility_id == String(load_p), facility_df)
@@ -219,22 +215,21 @@ function runmodel()
         # Draw one genPV profile at random from all regions in the area.
         # Note: unlike runmodel_multithread, runmodel has no region prompt and draws
         # from the full area pool. Add a region prompt here if region-level separation is needed.
-        Random.seed!(RANDOM_SEED)
         gen_p = rand(all_gen_profiles)
 
         println("Running: load=$(load_p)  |  fuse=$(fuse_size)A  |  bess=$(bess_type)  |  gen=$(gen_p)")
 
-        ToyModelHH, params, vars, constraints = makemodel(Symbol(load_p), Symbol(gen_p), bess_type, area, solver, price, profiles, tariff_tables)
+        model, params, vars, constraints = makemodel(Symbol(load_p), Symbol(gen_p), bess_type, area, solver, price, profiles, tariff_tables)
 
         (; loadHH, genPV) = params
-        (; Buy, Sell, NetloadHH, ChargeBESS, DischargeBESS, SocBESS, HHcost) = vars
+        (; Buy, Sell, ChargeBESS, DischargeBESS, SocBESS, TotCost) = vars
         (; BalanceHH) = constraints
         (; TIME) = params
 
-        optimize!(ToyModelHH)
+        optimize!(model)
 
         # Skip if model did not solve to optimality
-        if termination_status(ToyModelHH) != MOI.OPTIMAL
+        if termination_status(model) != MOI.OPTIMAL
             @warn "Model not optimal for load=$(load_p), gen=$(gen_p). Skipping."
             continue
         end
@@ -248,7 +243,7 @@ function runmodel()
         end
 
         # Extract results
-        netload_vals   = [round(value(NetloadHH[t]),        digits=4) for t in TIME]
+        netload_vals   = [round(value(Netload[t]),        digits=4) for t in TIME]
         # load_vals      = [round(value(loadHH[t]),           digits=4) for t in TIME]
         # gen_vals       = [round(value(genPV[t]),            digits=4) for t in TIME]
         # buy_vals       = [round(value(Buy[t]),              digits=4) for t in TIME]
@@ -257,7 +252,7 @@ function runmodel()
         # discharge_vals = [round(value(DischargeBESS[t]),    digits=4) for t in TIME]
         # soc_vals       = [round(value(SocBESS[t]),          digits=4) for t in TIME]
         # mc_vals        = [round(shadow_price(BalanceHH[t]), digits=4) for t in TIME]
-        total_cost     = round(value(HHcost),               digits=4)
+        total_cost     = round(value(TotCost),               digits=4)
 
         # # Full results CSV (appended row-wise as before)
         # case_df = DataFrame(

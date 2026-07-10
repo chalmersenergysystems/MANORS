@@ -6,7 +6,7 @@ export makeparameters, makevariables, makeconstraints, makemodel, runmodel, prin
 
 include(joinpath(@__DIR__, "inputdata.jl"))
 
-function makeparameters(load_profile, gen_profile, bess_type, area::Symbol, region::String, ev_ids::Vector{Symbol}, v2g_id::Union{String, Nothing})
+function makeparameters(load_profile, gen_profile, bess_type, area::Symbol, region::String, use_bess::Bool, ev_ids::Vector{Symbol}, v2g_id::Union{String, Nothing})
     (; price, profiles) = read_input_data()
     genPV_data = read_PV_data(region)
     (; battery_cap, homeshare, tripenergy, chargeenergy, charger_power, cost_public_charge, eta_chargeEV) = read_EV_data()
@@ -30,6 +30,7 @@ function makeparameters(load_profile, gen_profile, bess_type, area::Symbol, regi
     tariffHH, _, compensationPV = readtable(tariffparameters, AREA)
 
     # Battery parameters
+    bess_on = use_bess ? 1 : 0
     sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS, dodBESS, costBESS, n_cyclesBESS, lifetimeBESS, sohBESS = readtable(batteryparameters, BESS)
 
     # EV parameters (per-EV Dicts; empty Dicts when EV = Symbol[])
@@ -50,34 +51,33 @@ function makeparameters(load_profile, gen_profile, bess_type, area::Symbol, regi
     # Household parameters
     maxpower = BESS_TO_POWER[bess_type]
 
-    return (; TIME, AREA, EV, area, bess_type, maxpower, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS, dodBESS, costBESS, n_cyclesBESS, lifetimeBESS, sohBESS, sizeEV, home, driving_demandEV, logged_chargeEV, charger_power, cost_public_charge, eta_chargeEV, eta_dischargeEV, v2g)
+    return (; TIME, AREA, EV, area, bess_type, maxpower, loadHH, genPV, tariffHH, compensationPV, elprice, bess_on, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS, dodBESS, costBESS, n_cyclesBESS, lifetimeBESS, sohBESS, sizeEV, home, driving_demandEV, logged_chargeEV, charger_power, cost_public_charge, eta_chargeEV, eta_dischargeEV, v2g)
 end
 
 function makevariables(model, params)
     (; TIME, EV) = params
 
     @variables model begin
-        HHcost                                  # Mkr/year
-        Buy[t in TIME] >= 0                     # kWh/15-min
-        Sell[t in TIME] >= 0                    # kWh/15-min
-        NetloadHH[t in TIME]                    # kWh/15-min, positive means net load, negative means net generation
-        ChargeBESS[t in TIME] >= 0              # kWh/15-min (kW/4)
-        DischargeBESS[t in TIME] >= 0           # kWh/15-min (kW/4)
-        SocBESS[t in TIME] >= 0                 # kWh
-        CalDegBESS >= 0                         # % capacity lost due to calendar degradation
-        CycDegBESS >= 0                         # % capacity lost per cycle
-        ChargeEV[t in TIME, ev in EV] >= 0                  # kWh/15-min (kW/4)
-        PublicChargeEV[t in TIME, ev in EV] >= 0            # kWh/15-min (kW/4)
-        DischargeEV[t in TIME, ev in EV] >= 0               # kWh/15-min (kW/4), only for extension with V2G
-        SocEV[t in TIME, ev in EV] >= 0                     # kWh
+        TotCost                                                                     # €/year
+        0 <= Buy[t in TIME]            <= maxpower / 4 * (1 + overload_tol)         # kWh/15-min
+        0 <= Sell[t in TIME]           <= maxpower / 4 * (1 + overload_tol)         # kWh/15-min
+        0 <= ChargeBESS[t in TIME]                                                  # kWh/15-min (kW/4)
+        0 <= DischargeBESS[t in TIME]                                               # kWh/15-min (kW/4)
+        0 <= SocBESS[t in TIME]                                                     # kWh
+        0 <= CalDegBESS                                                             # % capacity lost due to calendar degradation
+        0 <= CycDegBESS                                                             # % capacity lost due to cycling
+        0 <= ChargeEV[t in TIME, ev in EV]                                          # kWh/15-min (kW/4)
+        0 <= PublicChargeEV[t in TIME, ev in EV]                                    # kWh/15-min (kW/4)
+        0 <= DischargeEV[t in TIME, ev in EV]                                       # kWh/15-min (kW/4), only for extension with V2G
+        0 <= SocEV[t in TIME, ev in EV] <= sizeEV[ev]                               # kWh
     end
 
-    return (; HHcost, Buy, Sell, NetloadHH, ChargeBESS, DischargeBESS, SocBESS, CalDegBESS, CycDegBESS, ChargeEV, PublicChargeEV, DischargeEV, SocEV)
+    return (; TotCost, Buy, Sell, ChargeBESS, DischargeBESS, SocBESS, CalDegBESS, CycDegBESS, ChargeEV, PublicChargeEV, DischargeEV, SocEV)
 end
 
 function makeconstraints(model, vars, params)
-    (; TIME, EV, area, bess_type, maxpower, loadHH, genPV, tariffHH, compensationPV, elprice, sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS, dodBESS, costBESS, n_cyclesBESS, lifetimeBESS, sohBESS, sizeEV, home, driving_demandEV, logged_chargeEV, charger_power, cost_public_charge, eta_chargeEV, eta_dischargeEV, v2g) = params
-    (; HHcost, Buy, Sell, NetloadHH, ChargeBESS, DischargeBESS, SocBESS, CalDegBESS, CycDegBESS, ChargeEV, PublicChargeEV, DischargeEV, SocEV) = vars
+    (; TIME, EV, area, bess_type, loadHH, genPV, tariffHH, compensationPV, elprice, bess_on,sizeBESS, rateBESS, eta_chargeBESS, eta_dischargeBESS, dodBESS, costBESS, n_cyclesBESS, lifetimeBESS, sohBESS, sizeBESS, home, driving_demandEV, charger_power, public_charger_power, cost_public_charge, eta_chargeEV, eta_dischargeEV, v2g) = params
+    (; TotCost, Buy, Sell, ChargeBESS, DischargeBESS, SocBESS, CalDegBESS, CycDegBESS, ChargeEV, PublicChargeEV, DischargeEV, SocEV) = vars
 
     @constraints model begin
         BalanceHH[t in TIME],
@@ -86,52 +86,47 @@ function makeconstraints(model, vars, params)
         BalanceBESS[t in TIME],
             SocBESS[t == TIME[end] ? TIME[1] : t+1] <= SocBESS[t] + (ChargeBESS[t] * eta_chargeBESS[bess_type]) - (DischargeBESS[t] / eta_dischargeBESS[bess_type])
 
-        LimitsSocBESS[t in TIME],
-            SocBESS[t] <= sizeBESS[bess_type] * dodBESS[bess_type]
+        LimitSocBESS[t in TIME],
+            SocBESS[t] <= sizeBESS[bess_type] * dodBESS[bess_type] * bess_on                # kWh, limited by usable capacity when BESS is active
 
-        LimitsChargeBESS[t in TIME],
-            ChargeBESS[t] <= sizeBESS[bess_type] * rateBESS[bess_type] / 4      # kWh/15-min
+        LimitChargeBESS[t in TIME],
+            ChargeBESS[t] <= sizeBESS[bess_type] * rateBESS[bess_type] / 4 * bess_on        # kWh/15-min
 
-        LimitsDischargeBESS[t in TIME],
-            DischargeBESS[t] <= sizeBESS[bess_type] * rateBESS[bess_type] / 4   # kWh/15-min
+        LimitDischargeBESS[t in TIME],
+            DischargeBESS[t] <= sizeBESS[bess_type] * rateBESS[bess_type] / 4 * bess_on     # kWh/15-min
 
-        NetloadHHdef[t in TIME],
-            NetloadHH[t] == Buy[t] - Sell[t]
-
-        MaxPowerIn[t in TIME],
-            Buy[t] <= maxpower / 4                          # kWh/15-min
-
-        MaxPowerOut[t in TIME],
-            Sell[t] <= maxpower / 4                         # kWh/15-min
-
-        CalendarDegradationBESS,                                                                                    # % capacity lost due to calendar degradation, i.e: 40% lost over 10 years
-            CalDegBESS == length(TIME) / (lifetimeBESS[bess_type] * 8760 * 4)                                       # optimization horizon [15-min intervals] / lifetime [15-min intervals]
+        CalendarDegradationBESS,                                                                                                # % capacity lost due to calendar degradation, i.e: 40% lost over 10 years
+            CalDegBESS == length(TIME) / (lifetimeBESS[bess_type] * 8760 * 4) * bess_on                                         # optimization horizon [15-min intervals] / lifetime [15-min intervals]
             # CalDegBESS == 0
 
-        CycleDegradationBESS,                                                                                       # % capacity lost per cycle, i.e. 40% lost over 6000 cycles
-            CycDegBESS == sum(DischargeBESS[t] for t in TIME) / (sizeBESS[bess_type] * n_cyclesBESS[bess_type])     # cycles over optimization horizon / cycles to end of life or # discharged energy over optimization horizon [kWh] / energy throughput over N cycles [kWh] 
+        CycleDegradationBESS,                                                                                                   # % capacity lost per cycle, i.e. 40% lost over 6000 cycles
+            CycDegBESS == sum(DischargeBESS[t] for t in TIME) / (sizeBESS[bess_type] * n_cyclesBESS[bess_type]) * bess_on       # cycles over optimization horizon / cycles to end of life or # discharged energy over optimization horizon [kWh] / energy throughput over N cycles [kWh] 
             # CycDegBESS == 0
 
         BalanceEV[t in TIME, ev in EV],
             SocEV[t == TIME[end] ? TIME[1] : t+1, ev] <= SocEV[t, ev] + (ChargeEV[t, ev] * eta_chargeEV * home[ev][t]) - (DischargeEV[t, ev] / eta_dischargeEV * home[ev][t]) + (PublicChargeEV[t, ev] * eta_chargeEV * (1-home[ev][t])) - driving_demandEV[ev][t]      # Note: driving demand is NOW positive for energy consumed
 
-        LimitsSocEV[t in TIME, ev in EV],
-            SocEV[t, ev] <= sizeEV[ev]
+        LimitChargeEV[t in TIME, ev in EV],
+            ChargeEV[t, ev] <= charger_power / 4 * home[ev][t]                  # kWh/15-min, only when the car is at home
 
-        LimitsChargeEV[t in TIME, ev in EV],
-            ChargeEV[t, ev] <= maxpower / 4 * home[ev][t]      # kWh/15-min, only when the car is at home
+        LimitDischargeEV[t in TIME, ev in EV],
+            DischargeEV[t, ev] <= charger_power / 4 * home[ev][t] * v2g         # kWh/15-min, only when the car is at home, only if V2G enabled
 
-        LimitsDischargeEV[t in TIME, ev in EV],
-            DischargeEV[t, ev] <= maxpower / 4 * home[ev][t] * v2g      # kWh/15-min, only when the car is at home, only if V2G enabled
+        LimitPublicChargeEV[t in TIME, ev in EV],
+            PublicChargeEV[t, ev] <= public_charger_power / 4 * home[ev][t]     # kWh/15-min, only when the car is at home
 
         Totalcosts,
-            HHcost == sum(Buy[t] * (elprice[t]*1.25 + tariffHH[area]) for t in TIME) * kWh_to_MWh -
+            TotCost == sum(Buy[t] * (elprice[t]*1.25 + tariffHH[area]) for t in TIME) * kWh_to_MWh -
                     sum(Sell[t] * (elprice[t] + compensationPV[area]) for t in TIME) * kWh_to_MWh +
                     sum(PublicChargeEV[t, ev] * cost_public_charge for t in TIME, ev in EV; init = 0.0) * kWh_to_MWh +
-                    (CalDegBESS + CycDegBESS) * costBESS[bess_type] * sizeBESS[bess_type] * (1 - sohBESS[bess_type])
+                    (CalDegBESS + CycDegBESS) * costBESS[bess_type] * sizeBESS[bess_type] * (1 - sohBESS[bess_type]) * bess_on    
     end
 
-    return (; BalanceHH, BalanceBESS, LimitsSocBESS, LimitsChargeBESS, LimitsDischargeBESS, NetloadHHdef, MaxPowerIn, MaxPowerOut, CalendarDegradationBESS, CycleDegradationBESS, BalanceEV, LimitsSocEV, LimitsChargeEV, LimitsDischargeEV, Totalcosts)
+    return (; BalanceHH, BalanceBESS, BalanceEV,
+              LimitSocBESS, LimitChargeBESS, LimitDischargeBESS, 
+              CalendarDegradationBESS, CycleDegradationBESS, 
+              LimitChargeEV, LimitDischargeEV, LimitPublicChargeEV,
+              Totalcosts)
 end
 
 function set_solver(solver::Symbol)
@@ -157,18 +152,18 @@ function set_solver(solver::Symbol)
     end
 end
 
-function makemodel(load_profile, gen_profile, bess_type, area::Symbol, region::String, solver::Symbol, ev_ids::Vector{Symbol}, v2g_id::Union{String, Nothing})
+function makemodel(load_profile, gen_profile, bess_type, area::Symbol, region::String, solver::Symbol, use_bess::Bool, ev_ids::Vector{Symbol}, v2g_id::Union{String, Nothing})
     optimizer = set_solver(solver)
     model = Model(optimizer)
 
-    params = makeparameters(load_profile, gen_profile, bess_type, area, region, ev_ids, v2g_id)
+    params = makeparameters(load_profile, gen_profile, bess_type, area, region, use_bess, ev_ids, v2g_id)
     vars = makevariables(model, params)
     constraints = makeconstraints(model, vars, params)
 
-    (; HHcost) = vars
+    (; TotCost) = vars
 
     @objective model Min begin
-        HHcost
+        TotCost
     end
 
     return model, params, vars, constraints
@@ -221,6 +216,18 @@ function runmodel()
     ismissing(fuse_size) && error("Missing fuse size for load profile \"$load_profile\".")
     bess_type = fuse_to_bess(fuse_size)
 
+    # Prompt for BESS
+    println("Run with BESS? (Yes/No): ")
+    bess_answer = lowercase(strip(readline()))
+    bess_answer ∉ ("yes", "no") && error("Invalid answer: \"$bess_answer\". Please enter 'Yes' or 'No'.")
+    use_bess = (bess_answer == "yes")
+    # if bess_answer == "yes"
+    #     continue
+    # else
+    #     bess_type = "no_bess"
+    #     sizeBESS = Dict("no_bess" => 0.0)
+    # end
+
     println("\nRunning: region=$region  |  load=$load_profile  |  fuse=$(fuse_size)A  |  bess=$bess_type  |  gen=$gen_profile")
     println("----------------------------------------------------------------------------------------------------------------------")
 
@@ -228,7 +235,7 @@ function runmodel()
     print("How many EVs? (0–3): ")
     n_ev = parse(Int, strip(readline()))
     (n_ev < 0 || n_ev > 3) && error("Invalid number of EVs: $n_ev. Must be 0–3.")
-    ev_folder = joinpath(raw"C:\Users\corte\Documents\REGAL_ToyModel\Input", "ev_data")
+    ev_folder = joinpath(raw"C:\Users\corte\Documents\GridHome\Input", "ev_data")
     good_ids = JSON3.read(read(joinpath(ev_folder, "EVs_charging_at_home.txt"), String), Vector{String})
     ev_ids = Symbol.(shuffle(good_ids)[1:n_ev])
     isempty(ev_ids) ? println("No EVs selected.") : println("Selected EVs: $(join(ev_ids, ", "))")
@@ -243,19 +250,19 @@ function runmodel()
         v2g_id = (v2g_answer == "yes") ? "v2g" : nothing
     end
 
-    ToyModelHH, params, vars, constraints = makemodel(load_profile, gen_profile, bess_type, area, region, solver, ev_ids, v2g_id)
+    model, params, vars, constraints = makemodel(load_profile, gen_profile, bess_type, area, region, solver, use_bess, ev_ids, v2g_id)
 
     (; TIME, elprice, loadHH, genPV, sizeBESS, maxpower, EV, sizeEV, driving_demandEV, logged_chargeEV) = params
-    (; Buy, Sell, NetloadHH, ChargeBESS, DischargeBESS, SocBESS, ChargeEV, PublicChargeEV, DischargeEV, SocEV, HHcost) = vars
+    (; Buy, Sell, ChargeBESS, DischargeBESS, SocBESS, ChargeEV, PublicChargeEV, DischargeEV, SocEV, TotCost) = vars
     (; BalanceHH) = constraints
 
-    optimize!(ToyModelHH)
-    status = termination_status(ToyModelHH)
+    optimize!(model)
+    status = termination_status(model)
 
     if status != MOI.OPTIMAL
-        compute_conflict!(ToyModelHH)
-        if get_attribute(ToyModelHH, MOI.ConflictStatus()) == MOI.CONFLICT_FOUND
-            iis_model, _ = copy_conflict(ToyModelHH)
+        compute_conflict!(model)
+        if get_attribute(model, MOI.ConflictStatus()) == MOI.CONFLICT_FOUND
+            iis_model, _ = copy_conflict(model)
             print(iis_model)
         end
         @warn "Model not optimal ($status) for load=$load_profile, gen=$gen_profile. No results saved."
@@ -263,12 +270,12 @@ function runmodel()
     end
 
     # Extract optimized values and marginal costs
-    total_cost     = round(value(HHcost),                                                                          digits=2)
+    total_cost     = round(value(TotCost),                                                                          digits=2)
     load_vals      = [round(value(loadHH[t]),                                                                      digits=2) for t in TIME]
     gen_vals       = [round(value(genPV[t]),                                                                       digits=2) for t in TIME]
     buy_vals       = [round(value(Buy[t]),                                                                         digits=2) for t in TIME]
     sell_vals      = [round(value(Sell[t]),                                                                        digits=2) for t in TIME]
-    netload_vals   = [round(value(NetloadHH[t]),                                                                   digits=2) for t in TIME]
+    netload_vals   = [round(value(Buy[t]) - value(Sell[t]),                                                        digits=2) for t in TIME]
     baseline_vals  = [round(loadHH[t] - genPV[t] + sum(logged_chargeEV[ev][t] for ev in EV; init=0.0),             digits=2) for t in TIME]
     charge_vals    = [round(value(ChargeBESS[t]),                                                                  digits=2) for t in TIME]
     discharge_vals = [round(value(DischargeBESS[t]),                                                               digits=2) for t in TIME]
@@ -293,28 +300,34 @@ function runmodel()
     for (i, ev) in enumerate(EV)
         results_df[!, "demand_ev_$i"]        = [round(driving_demandEV[ev][t],      digits=2) for t in TIME]
         results_df[!, "logged_ev_$i"]        = [round(logged_chargeEV[ev][t],       digits=2) for t in TIME]
-        results_df[!, "charge_ev_$i"]        = [round(value(ChargeEV[t, ev]),       digits=2) for t in TIME]
-        results_df[!, "public_charge_ev_$i"] = [round(value(PublicChargeEV[t, ev]), digits=2) for t in TIME]
-        results_df[!, "discharge_ev_$i"]     = [round(value(DischargeEV[t, ev]),    digits=2) for t in TIME]
+        results_df[!, "charge_ev_$i"]        = [round(value(ChargeEV[t, ev]) * eta_chargeEV[ev],       digits=2) for t in TIME]
+        results_df[!, "discharge_ev_$i"]     = [round(value(DischargeEV[t, ev]) / eta_dischargeEV[ev],    digits=2) for t in TIME]
+        results_df[!, "public_charge_ev_$i"] = [round(value(PublicChargeEV[t, ev]) * eta_chargeEV[ev], digits=2) for t in TIME]
         results_df[!, "soc_ev_$i"]           = [round(value(SocEV[t, ev]),          digits=2) for t in TIME]
     end
 
-    output_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Output\SingleRuns"
+    output_path = raw"C:\Users\corte\Documents\GridHome\Output\SingleRuns"
+    bess_suffix = use_bess ? "" : "_NoBESS"
     ev_suffix = (n_ev == 0) ? "" : "_$(n_ev)EV"
     v2g_suffix = isnothing(v2g_id) ? "" : "_V2G"
-    output_file = joinpath(output_path, "ToyModelHH_final_singlerun_$(load_profile)_$(gen_profile)_$(region)$(ev_suffix)$(v2g_suffix).csv")
+    output_file = joinpath(output_path, "GridHome_final_singlerun_$(load_profile)_$(gen_profile)_$(region)$(bess_suffix)$(ev_suffix)$(v2g_suffix).csv")
     CSV.write(output_file, results_df)
 
-    summary_file = joinpath(output_path, "ToyModelHH_final_singlerun_$(load_profile)_$(gen_profile)_$(region)$(ev_suffix)$(v2g_suffix)_summary.txt")
+    summary_file = joinpath(output_path, "GridHome_final_singlerun_$(load_profile)_$(gen_profile)_$(region)$(bess_suffix)$(ev_suffix)$(v2g_suffix)_summary.txt")
 
     open(summary_file, "w") do f
         println(f, "Single Run: region=$region | load=$load_profile | fuse=$(fuse_size)A | bess=$bess_type | gen=$gen_profile | $(ev_suffix)= $EV $(v2g_suffix)") 
         println(f, "-------------------------------------------------------------------------------------------------------------------------------------------")
         println(f, "Total cost = $total_cost €")
         println(f, "Revenue from solar PV = $(round(sum(value(Sell[t]) * elprice[t] for t in TIME) * kWh_to_MWh, digits=2)) €")
-        println(f, "Number of BESS cycles: $(round(sum(value(DischargeBESS[t]) for t in TIME) / sizeBESS[bess_type], digits=2))")
+        if use_bess
+            println(f, "Number of BESS cycles: $(round(sum(value(DischargeBESS[t]) for t in TIME) / sizeBESS[bess_type], digits=2))")
+        else
+            println(f, "Number of BESS cycles: n/a (BESS disabled)")
+        end
         for ev in EV
-            println(f, "Number of EV $ev battery cycles: $(round(sum(value(ChargeEV[t, ev]) for t in TIME; init=0.0) * 0.95 / sizeEV[ev], digits=2))")
+            println(f, "Number of EV $ev battery cycles: $(round(sum(value(DischargeEV[t, ev]) for t in TIME; init=0.0) / sizeEV[ev], digits=2))")
+            println(f, "Average daily V2G discharge: $(round(sum(value(DischargeEV[t, ev]) for t in TIME; init=0.0) / (length(TIME)/96), digits=2)) kWh/day")
         end
         n_buy_peak  = sum(value(Buy[t])  >= maxpower / 4 for t in TIME)
         n_sell_peak = sum(value(Sell[t]) >= maxpower / 4 for t in TIME)
