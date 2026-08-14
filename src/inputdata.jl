@@ -6,12 +6,20 @@ function prepare_elprice(df, ordered_timestamp)
     sweden = filter(row -> row.MapCode in område, df)
     select!(sweden, [Symbol("DateTime(UTC)"), :MapCode, Symbol("Price[Currency/MWh]")])
     sweden = unstack(sweden, :MapCode, Symbol("Price[Currency/MWh]"))
+    for col in [:SE1, :SE2, :SE3, :SE4]
+        sweden[!, col] = coalesce.(sweden[!, col], 0.0)
+    end
     rename!(sweden, Symbol("DateTime(UTC)") => :id_timestamp)
 
     ordered_timestamp[!, :id_timestamp] = string.(ordered_timestamp.id_timestamp)
+    ordered_timestamp[!, :idx] = 1:nrow(ordered_timestamp)
     sweden[!, :id_timestamp] = string.(sweden.id_timestamp)
     sweden[!, :id_timestamp] = sweden.id_timestamp .* "+00:00"
     elprice = semijoin(sweden, ordered_timestamp, on = :id_timestamp)
+
+    # Fix timestep ordering (stitched 2025-2024)
+    leftjoin!(elprice, ordered_timestamp, on = :id_timestamp)
+    select!(sort!(elprice, :idx), Not(:idx))
 
     return elprice
 end
@@ -68,12 +76,20 @@ gridarea_to_region = Dict(
 # Read input data: electricity prices, load profiles, facility metadata
 function read_input_data()
     # Define path
-    input_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Input"
+    input_path = raw"C:\Users\corte\Documents\GridHome\Input"
 
-    # Read electricity price data
-    entsoe = CSV.read(joinpath(input_path, "ENTSOE day ahead energy prices 2015-2026.csv"), DataFrame)
-    ordered_timestamp = CSV.read(joinpath(input_path, "ordered_timestamp.csv"), DataFrame)
-    elprice_df = prepare_elprice(entsoe, ordered_timestamp)
+    # Read electricity price data - ENTSOE (2025-2024)
+    # entsoe = CSV.read(joinpath(input_path, "ENTSOE day ahead energy prices 2015-2026.csv"), DataFrame)
+    # ordered_timestamp = CSV.read(joinpath(input_path, "ordered_timestamp.csv"), DataFrame)
+    # elprice_df = prepare_elprice(entsoe, ordered_timestamp)
+    # elprice_df = elprice_df[repeat(1:nrow(elprice_df), inner=4), :]
+
+    # Read electricity price data - NordPool (choose between 2021, 2022, 2023, 2024)
+    year = 2024
+    println("Running with electricity price data from NordPool for $year")
+    elprice_df = CSV.read(joinpath(input_path, "supersecret_elprice$year.csv"), DataFrame, delim=";")
+    select!(elprice_df, Not(["Delivery Start (CET)", "Delivery End (CET)"]))
+    rename!(elprice_df, Symbol("SE1 Price (EUR)") => :SE1, Symbol("SE2 Price (EUR)") => :SE2, Symbol("SE3 Price (EUR)") => :SE3, Symbol("SE4 Price (EUR)") => :SE4)
     elprice_df = elprice_df[repeat(1:nrow(elprice_df), inner=4), :]
 
     # Read facility metadata
@@ -81,7 +97,8 @@ function read_input_data()
 
     # Read consumption profiles from CSV files
     loadAPT_df = CSV.read(joinpath(input_path, "APT_sampled_profiles_merged.csv"), DataFrame)
-    loadHH_df = CSV.read(joinpath(input_path, "HH_sampled_profiles_merged.csv"), DataFrame)
+    loadHH_df = CSV.read(joinpath(input_path, "HH_selected_profiles.csv"), DataFrame)
+    # println(names(loadHH_df))
 
     # Clean up dataframes
     loadAPT_df = df_cleanup!(loadAPT_df)
@@ -95,13 +112,15 @@ function read_input_data()
     price = (; SE1=Array(elprice_df."SE1"), SE2=Array(elprice_df."SE2"), SE3=Array(elprice_df."SE3"), SE4=Array(elprice_df."SE4"))
     profiles = (; loadAPT, loadHH)
 
-    return (; price, profiles, facility_df)
+    avg_power_tariff = 7.4                    # €/kW/month, based on typical grid tariffs for households in Sweden
+
+    return (; price, profiles, facility_df, avg_power_tariff)
 end
 
 # Read PV profiles for the selected gridarea (MULTITHREAD)
 function read_PV_data(area::Symbol)
     # Define path
-    input_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Input"
+    input_path = raw"C:\Users\corte\Documents\GridHome\Input"
     synth_path = joinpath(input_path, "synth_profiles")
 
     # Read generation profiles from CSV files
@@ -137,7 +156,7 @@ end
 # Read PV profiles for the selected region (SINGLE RUN)
 function read_PV_data(region::String)
     # Define path
-    input_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Input"
+    input_path = raw"C:\Users\corte\Documents\GridHome\Input"
     synth_path = joinpath(input_path, "synth_profiles")
 
     filepath = joinpath(synth_path, "pv_profiles_$(region).csv")
@@ -155,7 +174,7 @@ end
 # Read EV input data
 function read_EV_data()
     # Define path
-    input_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Input"
+    input_path = raw"C:\Users\corte\Documents\GridHome\Input"
     ev_folder = joinpath(input_path, "ev_data")
 
     # Read EV data
@@ -189,11 +208,12 @@ function read_EV_data()
     chargeenergy = df_to_axisarray(chargeenergy)
 
     # EV parameters
-    charger_power = 22                     # kW, choose between 6.9 kW (10A), 11 kW (16A) or 22 kW (32A), ref: https://www.evify.se/produkter/laddboxar/
+    charger_power = 11                      # kW, choose between 3.7 kW (16A, mono-phase), 11 kW (16A, tri-phase) or 22 kW (32A, tri-phase), ref: https://www.evify.se/produkter/laddboxar/
+    public_charger_power = 200              # kW, typical max power for public AC chargers
     cost_public_charge = 560.0              # €/MWh, based on average public charging prices in Sweden, ref: https://alternative-fuels-observatory.ec.europa.eu/markets-and-policy/market-and-consumer-insights/electric-vehicle-recharging-prices
     eta_chargeEV = 0.95                     # charging efficiency, for V2G option: discharging efficiency defined in makeparameters() as eta_dischargeEV = eta_chargeEV
 
-    return (; battery_cap, homeshare, tripenergy, chargeenergy, charger_power, cost_public_charge, eta_chargeEV)
+    return (; battery_cap, homeshare, tripenergy, chargeenergy, charger_power, public_charger_power, cost_public_charge, eta_chargeEV)
 end
 
 readrow(table, rownum, headings) = NamedTuple(h => table[rownum, i+1] for (i, h) in enumerate(headings))    # +1 to ignore the first table column
@@ -225,8 +245,9 @@ function read_input_tables()
 end
 
 # Map fuse size to BESS type and max power
+const FUSE_TO_POWER_FACTOR = sqrt(3) * 0.4                                      # conversion factor from fuse size (A) to max power (kW), assuming tri-phase and 400V
+const FUSE_TO_POWER = Dict(16 => 11.0, 20 => 14.0, 25 => 17.0, 35 => 24.0)      # approximate max power in kW for each fuse size, ref: https://partilleenergi.se/en/faq/vilket-effektuttag-kan-jag-ha-pa-min-huvudsakring/
 const FUSE_TO_BESS = Dict(16 => :BESS6, 20 => :BESS10, 25 => :BESS14, 35 => :BESS20)
-# const FUSE_TO_POWER = Dict(16 => 11.0, 20 => 14.0, 25 => 17.0, 35 => 24.0)   # approximate max power in kW for each fuse size, ref: https://partilleenergi.se/en/faq/vilket-effektuttag-kan-jag-ha-pa-min-huvudsakring/
 const BESS_TO_POWER = Dict(:BESS6 => 11.0, :BESS10 => 14.0, :BESS14 => 17.0, :BESS20 => 24.0)   # max power in kW for the house
 
 # Map fuse size to BESS type. Note: this is a simplified mapping for demonstration purposes. In reality, the appropriate BESS size would depend on the specific load profile, PV generation, and other factors.
@@ -256,4 +277,20 @@ end
 const kWh_to_MWh = 1 / 1000
 
 # Select seed for reproducibility. Note: this is set once at the start of the program, not per profile, to ensure different random draws across profiles while still being reproducible.
-const RANDOM_SEED = 18
+const RANDOM_SEED = 18              # Standard = 18
+
+# Define the number of timesteps for each month in a non-leap year (2025)
+MONTH_TIMESTEPS = Dict(
+    :January   => 1:2976,          # 31 days * 24 hours/day * 4 (15-min intervals/hour) = 2976
+    :February  => 2977:5664,       # 28 days * 24 hours/day * 4 (15-min intervals/hour) = 2688,     2976 + 2688 = 5664
+    :March     => 5665:8640,       # 31 days * 24 hours/day * 4 (15-min intervals/hour) = 2976,     5664 + 2976 = 8640
+    :April     => 8641:11520,      # 30 days * 24 hours/day * 4 (15-min intervals/hour) = 2880,     8640 + 2880 = 11520
+    :May       => 11521:14496,     # 31 days * 24 hours/day * 4 (15-min intervals/hour) = 2976,    11520 + 2976 = 14496
+    :June      => 14497:17376,     # 30 days * 24 hours/day * 4 (15-min intervals/hour) = 2880,    14496 + 2880 = 17376
+    :July      => 17377:20352,     # 31 days * 24 hours/day * 4 (15-min intervals/hour) = 2976,    17376 + 2976 = 20352
+    :August    => 20353:23328,     # 31 days * 24 hours/day * 4 (15-min intervals/hour) = 2976,    20352 + 2976 = 23328
+    :September => 23329:26208,     # 30 days * 24 hours/day * 4 (15-min intervals/hour) = 2880,    23328 + 2880 = 26208
+    :October   => 26209:29184,     # 31 days * 24 hours/day * 4 (15-min intervals/hour) = 2976,    26208 + 2976 = 29184
+    :November  => 29185:32064,     # 30 days * 24 hours/day * 4 (15-min intervals/hour) = 2880,    29184 + 2880 = 32064
+    :December  => 32065:35040      # 31 days * 24 hours/day * 4 (15-min intervals/hour) = 2976,    32064 + 2976 = 35040
+)
