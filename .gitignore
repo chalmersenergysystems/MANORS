@@ -5,3 +5,6 @@ Plots/
 *.xlsx
 Manifest.toml
 workspace.jl
+help.jl
+wip_ev.jl
+TestModels/
