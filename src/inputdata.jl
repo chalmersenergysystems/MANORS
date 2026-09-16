@@ -1,5 +1,11 @@
 using DataFrames, CSV, XLSX, AxisArrays, JSON3
 
+# --- Project paths ---
+# Input/ and Output/ folders live at the repository root (both are git-ignored, see .gitignore).
+# Resolved relative to this file's location, so it works regardless of where the repo is cloned to.
+const INPUT_PATH  = normpath(joinpath(@__DIR__, "..", "Input"))
+const OUTPUT_PATH = normpath(joinpath(@__DIR__, "..", "Output"))
+
 # Select electricity price data for the 4 Swedish bidding areas
 function prepare_elprice(df, ordered_timestamp)
     område = ["SE1", "SE2", "SE3", "SE4"]
@@ -76,7 +82,7 @@ gridarea_to_region = Dict(
 # Read input data: electricity prices, load profiles, facility metadata
 function read_input_data()
     # Define path
-    input_path = raw"C:\Users\corte\Documents\GridHome\Input"
+    input_path = INPUT_PATH
 
     # Read electricity price data - ENTSOE (2025-2024)
     # entsoe = CSV.read(joinpath(input_path, "ENTSOE day ahead energy prices 2015-2026.csv"), DataFrame)
@@ -120,7 +126,7 @@ end
 # Read PV profiles for the selected gridarea (MULTITHREAD)
 function read_PV_data(area::Symbol)
     # Define path
-    input_path = raw"C:\Users\corte\Documents\GridHome\Input"
+    input_path = INPUT_PATH
     synth_path = joinpath(input_path, "synth_profiles")
 
     # Read generation profiles from CSV files
@@ -156,7 +162,7 @@ end
 # Read PV profiles for the selected region (SINGLE RUN)
 function read_PV_data(region::String)
     # Define path
-    input_path = raw"C:\Users\corte\Documents\GridHome\Input"
+    input_path = INPUT_PATH
     synth_path = joinpath(input_path, "synth_profiles")
 
     filepath = joinpath(synth_path, "pv_profiles_$(region).csv")
@@ -174,7 +180,7 @@ end
 # Read EV input data
 function read_EV_data()
     # Define path
-    input_path = raw"C:\Users\corte\Documents\GridHome\Input"
+    input_path = INPUT_PATH
     ev_folder = joinpath(input_path, "ev_data")
 
     # Read EV data

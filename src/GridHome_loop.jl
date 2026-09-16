@@ -188,7 +188,7 @@ function runmodel()
     load_profiles = collect(Base.axes(profiles.loadHH, 2))
     all_gen_profiles = collect(Base.axes(profiles.genPV, 2))
 
-    output_path  = raw"C:\Users\corte\Documents\GridHome\Output"
+    output_path  = OUTPUT_PATH
     # output_file  = joinpath(output_path, "GridHome_results_all.csv")  # not used for now
     netload_file = joinpath(output_path, "GridHome_netload_$(area).csv")
 

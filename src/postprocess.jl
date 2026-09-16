@@ -2,10 +2,33 @@ using DataFrames, CSV, Statistics
 
 include(joinpath(@__DIR__, "inputdata.jl"))
 
+# ==============================================================================================
+# Terminology used throughout this file (as defined in the README):
+#   "individual power tariff" model (GridHome_powertariff.jl), tariff ∈ {0,1,2} (No Tariff /
+#     Daytime Tariff / All Hours Tariff). Each household is optimized independently, with its
+#     own fuse-based connection limit.
+#   "collective power tariff" model (GridHome_collectivetariff.jl), tariff == 3 (Collective
+#     Tariff). All households in an area are optimized jointly, sharing one grid connection.
+#
+# Both models write one CSV per household to the same folder layout:
+#   OUTPUT_PATH/Seed<seed>/AllRuns/Seed<seed>_<area>_Tariff<tariff>/
+#       GridHome_<area>_<profile>_EV_<ev_id>_Tariff<tariff>.csv
+# so the "CURRENT" functions below treat the individual (tariff 0-2) and collective (tariff 3)
+# models uniformly — only the tariff number differs.
+# ==============================================================================================
+
+# ------------------------------------------------------------------------------------------
+# OBSOLETE — these two functions belong to the earlier PV+BESS pipeline (GridHome_loop.jl /
+# GridHome_multithread.jl), which optimizes household load against solar generation (genPV)
+# and a home battery (BESS); it has no EV and no power tariff, and is unrelated to the
+# current individual/collective tariff models. They read/write "GridHome_netload_<region>.csv"
+# and "run_<i>_load..._bess..._gen..." named columns that those models never produce.
+# Kept only for reference — not updated to the current model/folder structure.
+# ------------------------------------------------------------------------------------------
 function load_profiles(region::String)
     # Define paths
-    input_path  = raw"C:\Users\corte\Documents\GridHome\Input"
-    output_path = raw"C:\Users\corte\Documents\GridHome\Output"
+    input_path  = INPUT_PATH
+    output_path = OUTPUT_PATH
     synth_path  = joinpath(input_path, "synth_profiles")
 
     # Read generation profiles and results from CSV files
@@ -26,8 +49,8 @@ function build_profiles()
     # area ∉ (:SE1, :SE2, :SE3, :SE4) && error("Invalid area: \"$area_str\". Valid options are SE1, SE2, SE3, SE4.")
 
     # Define paths
-    input_path  = raw"C:\Users\corte\Documents\GridHome\Input"
-    output_path = raw"C:\Users\corte\Documents\GridHome\Output"
+    input_path  = INPUT_PATH
+    output_path = OUTPUT_PATH
 
     # Load shared HH profiles once
     load_df = CSV.read(joinpath(input_path, "HH_sampled_profiles_merged.csv"), DataFrame)
@@ -77,13 +100,30 @@ function build_profiles()
     end
 end
 
-function build_netload_profiles()
-    path = raw"C:\Users\corte\Documents\GridHome\Output\lowtariff"
-    runs_path = joinpath(path, "ThereseRuns")
+# ------------------------------------------------------------------------------------------
+# CURRENT — postprocessing pipeline for the individual (GridHome_powertariff.jl, tariff 0-2)
+# and collective (GridHome_collectivetariff.jl, tariff 3) power tariff models. Run in this order:
+#   1. build_netload_profiles(seed)             — adds an `optimized` column to every raw run CSV
+#   2. collect_results(seed, tariff, area), or interactively collect_results()
+#                                                — aggregates all households in an area into
+#                                                  per-metric wide CSVs
+#   3. find_peaks()                              — cross-seed monthly peak/dip summary
+#   4. compare_tariffs_monthly()                 — compact peak/dip summary across tariffs
+#   5. average_areas(seed, tariff)               — averages aggregates across the four areas
+# ------------------------------------------------------------------------------------------
+
+function build_netload_profiles(seed::Int)
+    # Adds an `optimized` column (net grid draw) to every raw per-household run CSV, so that
+    # collect_results can rely on a common column name. Neither the individual nor the
+    # collective tariff model defines a `Sell` variable at all right now (both only ever
+    # `Buy`), so `optimized` is currently just an alias for `buy`; the `sell` branch is kept
+    # temporarily in case a future model variant reintroduces PV/export (V2G, PV, ...) and
+    # defines `Sell` again.
+    runs_path = joinpath(OUTPUT_PATH, "Seed$(seed)", "AllRuns")
 
     for area in ["SE1", "SE2", "SE3", "SE4"]
         for tariff in 0:3
-            folder = joinpath(runs_path, "Seed18_$(area)_Tariff$(tariff)")
+            folder = joinpath(runs_path, "Seed$(seed)_$(area)_Tariff$(tariff)")
             isdir(folder) || (@warn "Folder not found: $folder, skipping."; continue)
 
             csv_files = filter(f -> endswith(f, ".csv"), readdir(folder, join=true))
@@ -101,17 +141,19 @@ function build_netload_profiles()
 
                 CSV.write(fpath, df)
             end
-            println("Processed optimized netload profiles for $area with tariff $tariff")
+            println("Processed optimized netload profiles for $area with tariff $tariff (individual if 0-2, collective if 3)")
         end
         
     end
 end
 
 function collect_results(seed::Int, tariff::Int, area::String)
-    # Define paths
-    path       = raw"C:\Users\corte\Documents\GridHome\Output\lowtariff"
-    folder     = joinpath(path, "ThereseRuns", "Seed$(seed)_$(area)_Tariff$(tariff)")
-    agg_folder = joinpath(path, "ThereseAggs", "Seed$(seed)_Tariff$(tariff)")
+    # Aggregates all per-household CSVs for one seed/tariff/area into per-metric wide CSVs
+    # (one column per household) plus a one-day percentage breakdown. Works for both the
+    # individual tariff model (tariff 0-2) and the collective tariff model (tariff 3), since
+    # they share the same per-household file naming.
+    folder     = joinpath(OUTPUT_PATH, "Seed$(seed)", "AllRuns", "Seed$(seed)_$(area)_Tariff$(tariff)")
+    agg_folder = joinpath(OUTPUT_PATH, "Seed$(seed)", "Aggregates", "Seed$(seed)_Tariff$(tariff)")
     !isdir(agg_folder) && mkpath(agg_folder)
 
     isdir(folder) || error("Folder not found: $folder")
@@ -120,20 +162,6 @@ function collect_results(seed::Int, tariff::Int, area::String)
     csv_files = filter(f -> endswith(f, ".csv"), readdir(folder, join=true))
     isempty(csv_files) && error("No CSV files found in $folder")
 
-    # # Initialize DataFrames for aggregation
-    # first_df = CSV.read(first(csv_files), DataFrame)
-    # df_houseload = DataFrame(time = first_df.time)
-    # df_logged    = DataFrame(time = first_df.time)
-    # df_driving   = DataFrame(time = first_df.time)
-    # df_charge    = DataFrame(time = first_df.time)
-    # df_discharge = DataFrame(time = first_df.time)
-    # df_public_ch = DataFrame(time = first_df.time)
-    # df_baseline  = DataFrame(time = first_df.time)
-    # df_optimized = DataFrame(time = first_df.time)
-    # df_buy_el    = DataFrame(time = first_df.time)
-    # df_sell_el   = DataFrame(time = first_df.time)
-    # all_sums     = DataFrame(time = first_df.time)
-
     # Get baseline timeline information
     first_df = CSV.read(first(csv_files), DataFrame)
     n_rows   = nrow(first_df)
@@ -141,6 +169,9 @@ function collect_results(seed::Int, tariff::Int, area::String)
     
     # Explicit configuration mapping:
     # ( Output File Name, Internal Key / Old DF Name, Source CSV Column )
+    # Note: `discharge_ev` and `sell_el` are legacy BESS/V2G columns that the current
+    # individual/collective tariff models never produce — they default to zero via
+    # `hasproperty` below.
     metrics_config = [
         ("houseload",     :df_houseload, :load),
         ("logged",        :df_logged,    :logged_ev),
@@ -160,32 +191,13 @@ function collect_results(seed::Int, tariff::Int, area::String)
     all_sums = DataFrame(time = times)
     ev_mapping = DataFrame(profile = Symbol[], ev_id = String[])
 
-    # for (i, fpath) in enumerate(csv_files)
-    #     df = CSV.read(fpath, DataFrame)
-    #     cn = Symbol("x$i")
-
-    #     m = Base.match(Regex("with_EV_(.+?)_fuselim_$tariff"), basename(fpath))
-    #     ev_id = m !== nothing ? m[1] : "unknown"
-    #     push!(ev_mapping, (cn, ev_id))
-
-    #     df_houseload[!, cn] = df.load
-    #     df_logged[!, cn]    = df.logged_ev
-    #     df_driving[!, cn]   = df.demand_ev
-    #     df_charge[!, cn]    = df.charge_ev
-    #     df_discharge[!, cn] = df.discharge_ev
-    #     df_public_ch[!, cn] = df.public_charge_ev
-    #     df_baseline[!, cn]  = df.baseline
-    #     df_optimized[!, cn] = df.optimized
-    #     df_buy_el[!, cn]    = df.buy
-    #     df_sell_el[!, cn]   = df.sell
-    # end
-
     # Loop through and populate files
     for (i, fpath) in enumerate(csv_files)
         df = CSV.read(fpath, DataFrame)
         cn = Symbol("x$i")
 
-        m = Base.match(Regex("with_EV_(.+?)_fuselim_$tariff"), basename(fpath))
+        # Filename pattern (both individual and collective tariff models): GridHome_<area>_<profile>_EV_<ev_id>_Tariff<tariff>.csv
+        m = Base.match(Regex("_EV_(.+?)_Tariff$(tariff)\\.csv\$"), basename(fpath))
         ev_id = m !== nothing ? m[1] : "unknown"
         push!(ev_mapping, (cn, ev_id))
 
@@ -227,23 +239,21 @@ function collect_results(seed::Int, tariff::Int, area::String)
     end
 
     CSV.write(joinpath(agg_folder, area * "_oneday_pcts.csv"), oneday_pct)
-    println("  Saved aggregates for Seed$(seed)_$(area)")
+    println("  Saved aggregates for Seed$(seed)_$(area)_Tariff$(tariff)")
 end
 
 function collect_results()
-    path       = raw"C:\Users\corte\Documents\GridHome\Output\lowtariff"
-    runs_path  = joinpath(path, "ThereseRuns")
-
-    # Discover available seeds from folder names like Seed18_SE1
-    subdirs = filter(d -> isdir(joinpath(runs_path, d)), readdir(runs_path))
+    # Interactive entry point: discovers available seeds directly under OUTPUT_PATH (each
+    # seed re-run of the models lives in its own OUTPUT_PATH/Seed<seed>/ folder).
+    subdirs = filter(d -> isdir(joinpath(OUTPUT_PATH, d)), readdir(OUTPUT_PATH))
     seeds   = sort(unique([
         parse(Int, m[1])
         for d in subdirs
-        for m in [Base.match(r"^Seed(\d+)_SE\d+_Tariff(\d+)$", d)]
+        for m in [Base.match(r"^Seed(\d+)$", d)]
         if m !== nothing
     ]))
 
-    isempty(seeds) && error("No Seed*_SE*_Tariff* folders found in $runs_path")
+    isempty(seeds) && error("No Seed<N> folders found in $OUTPUT_PATH")
 
     println("Available seeds: $(join(seeds, ", "))")
     print("Enter seed(s) to process (comma-separated, or 'all'): ")
@@ -260,36 +270,35 @@ function collect_results()
     for seed in chosen_seeds
         println("\nProcessing Seed$(seed)...")
         for area in ["SE1", "SE2", "SE3", "SE4"]
-            isdir(joinpath(runs_path, "Seed$(seed)_$(area)_Tariff$(tariff)")) || (@warn "Seed$(seed)_$(area)_Tariff$(tariff) not found, skipping."; continue)
+            isdir(joinpath(OUTPUT_PATH, "Seed$(seed)", "AllRuns", "Seed$(seed)_$(area)_Tariff$(tariff)")) || (@warn "Seed$(seed)_$(area)_Tariff$(tariff) not found, skipping."; continue)
             collect_results(seed, tariff, area)
         end
     end
 end
 
 function find_peaks()
-    # Define paths
-    path = raw"C:\Users\corte\Documents\GridHome\Output\lowtariff"
-    agg_root = joinpath(path, "ThereseAggs")
-    summary = joinpath(agg_root, "Summary")
+    # Cross-seed summary of monthly peak (max import power) and dip (max export power) per
+    # area/household, across every available seed and tariff (0-2 individual, 3 collective).
+    # Dips will be ~0 for the current models since neither produces PV export (`sell_el`);
+    # kept for compatibility with any future model variant that does export.
+    summary = joinpath(OUTPUT_PATH, "Aggregates", "Summary")
     isdir(summary) || mkpath(summary)
 
     day_to_15min = 96                                               # Number of 15-minute intervals in a day (24 hours * 4 intervals per hour)
     month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]   # Number of days in each month
     cumulative_15min  = [0; cumsum(month_days)] .* day_to_15min     # Cumulative 15-minute intervals at the end of each month
 
-    for tariff in 0:3
-        # Discover seed folders
-        seed_folders = filter(
-            d -> isdir(joinpath(agg_root, d)) && occursin(Regex("^Seed\\d+_Tariff$(tariff)\$"), d),
-            readdir(agg_root)
-        )
+    # Discover every seed's Aggregates folder directly under OUTPUT_PATH
+    seed_dirs = filter(d -> isdir(joinpath(OUTPUT_PATH, d)) && Base.match(r"^Seed(\d+)$", d) !== nothing, readdir(OUTPUT_PATH))
 
+    for tariff in 0:3
         summary_peaks_df = DataFrame(seed = Int[], month = String[], area = Symbol[], profile = Symbol[], peak = Float64[])
         summary_dips_df = DataFrame(seed = Int[], month = String[], area = Symbol[], profile = Symbol[], dip = Float64[])
 
-        for seed_folder in seed_folders
-            seed = parse(Int, Base.match(r"^Seed(\d+)_Tariff\d+$", seed_folder)[1])
-            agg_folder = joinpath(agg_root, seed_folder)
+        for seed_dir in seed_dirs
+            seed = parse(Int, Base.match(r"^Seed(\d+)$", seed_dir)[1])
+            agg_folder = joinpath(OUTPUT_PATH, seed_dir, "Aggregates", "Seed$(seed)_Tariff$(tariff)")
+            isdir(agg_folder) || continue
 
             for area in [:SE1, :SE2, :SE3, :SE4]
                 opt_profiles = CSV.read(joinpath(agg_folder, String(area) * "_aggregates_optimized.csv"), DataFrame)
@@ -342,10 +351,10 @@ function find_peaks()
     end
 end
 
-function mini_summary_peaks()
-    path = raw"C:\Users\corte\Documents\GridHome\Output\lowtariff"
-    agg_root = joinpath(path, "ThereseAggs")
-    summary = joinpath(agg_root, "Summary")
+function compare_tariffs_monthly()
+    # Compact peak/dip summary comparing all 4 tariff options: individual No/Daytime/All Hours
+    # Tariff (0-2) and collective Collective Tariff (3). Requires find_peaks() to have run first.
+    summary = joinpath(OUTPUT_PATH, "Aggregates", "Summary")
 
     for var in ["peak", "dip"]
         no_tariff = CSV.read(joinpath(summary, "summary_$(var)s_Tariff0.csv"), DataFrame)
@@ -366,18 +375,19 @@ function mini_summary_peaks()
                         "Collective Tariff" => mean => "Collective Tariff"
                         )
 
-        CSV.write(joinpath(summary, "mini_summary_$(var)s.csv"), area_avg)
+        CSV.write(joinpath(summary, "tariff_comparison_monthly_$(var)s.csv"), area_avg)
     end
 end
 
-function avg_area(tariff::Int)
-    path = raw"C:\Users\corte\Documents\GridHome\Output\lowtariff"
-    agg_root = joinpath(path, "ThereseAggs")
+function average_areas(seed::Int, tariff::Int)
+    # Averages a seed's per-area aggregates (SE1-SE4) into a single Sweden-wide series, for
+    # either an individual tariff (0-2) or the collective Collective Tariff (3).
+    agg_root = joinpath(OUTPUT_PATH, "Seed$(seed)", "Aggregates")
 
     # Change based on which results to average
     suffix = "_Tariff$tariff"
 
-    folder = joinpath(agg_root, "Seed18$(suffix)")
+    folder = joinpath(agg_root, "Seed$(seed)$(suffix)")
     summary = joinpath(agg_root, "Summary_temp")
     isdir(summary) || mkpath(summary)
 

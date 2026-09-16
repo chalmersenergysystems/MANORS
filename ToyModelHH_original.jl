@@ -112,7 +112,7 @@ function runmodel()
     # Create results DataFrame
     results_df = DataFrame(time=TIME, load=load, gen=gen, buy=buy, sell=sell, netload=netload, marginal_cost=marginal_cost)
     
-    output_path = raw"C:\Users\corte\Documents\REGAL_ToyModel\Output"
+    output_path = joinpath(@__DIR__, "Output")
     CSV.write(joinpath(output_path, "ToyModelHH_results.csv"), results_df)
 
     return results_df

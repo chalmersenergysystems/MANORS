@@ -9,15 +9,19 @@ import glob
 
 gridarea = "SE4"     # SE1, SE2, SE3, SE4
 
-input_folder = r"C:\Users\corte\Documents\REGAL_ToyModel\Input"
-output_folder = r"C:\Users\corte\Documents\REGAL_ToyModel\Output"
+# Input/, Output/ and Plots/ folders live at the repository root (git-ignored).
+# Resolved relative to this file's location, so it works regardless of where the repo is cloned to.
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+input_folder = os.path.join(project_root, "Input")
+output_folder = os.path.join(project_root, "Output")
 synth_folder = os.path.join(input_folder, "synth_profiles")
 
-plot_folder = rf"C:\Users\corte\Documents\REGAL_ToyModel\Plots\Netloads_{gridarea}_20260429"
-dummy_folder = rf"C:\Users\corte\Documents\REGAL_ToyModel\Plots\Dummyloads_{gridarea}_20260429"
-poster_folder = rf"C:\Users\corte\Documents\REGAL_ToyModel\Plots\Poster_plots_20260505"
-hh_folder = rf"C:\Users\corte\Documents\REGAL_ToyModel\Plots\HH_loads"
-apt_folder = rf"C:\Users\corte\Documents\REGAL_ToyModel\Plots\APT_loads"
+plots_root = os.path.join(project_root, "Plots")
+plot_folder = os.path.join(plots_root, f"Netloads_{gridarea}")
+dummy_folder = os.path.join(plots_root, f"Dummyloads_{gridarea}")
+poster_folder = os.path.join(plots_root, "Poster_plots")
+hh_folder = os.path.join(plots_root, "HH_loads")
+apt_folder = os.path.join(plots_root, "APT_loads")
 
 os.makedirs(plot_folder, exist_ok=True)
 os.makedirs(dummy_folder, exist_ok=True)

@@ -83,7 +83,7 @@ function runmodel_multithread()
     n_batches      = ceil(Int, n_combinations / n_threads)
     println("Total combinations: $n_combinations  |  Threads: $n_threads  |  Batches: ~$n_batches")
 
-    output_path  = raw"C:\Users\corte\Documents\GridHome\Output"
+    output_path  = OUTPUT_PATH
     results          = Vector{Union{Nothing, Tuple{String, Vector{Float64}}}}(nothing, n_combinations)
     print_lock       = ReentrantLock()
     stop_flag        = Threads.Atomic{Bool}(false)

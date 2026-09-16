@@ -21,7 +21,7 @@ function makeparameters(area::Symbol)
 
     # EV parameters
     Random.seed!(RANDOM_SEED)
-    ev_folder  = joinpath(raw"C:\Users\corte\Documents\GridHome\Input", "ev_data")
+    ev_folder  = joinpath(INPUT_PATH, "ev_data")
     good_ids   = JSON3.read(read(joinpath(ev_folder, "EVs_charging_at_home.txt"), String), Vector{String})
     ev_assignment = Dict(zip(load_profiles, shuffle(good_ids)))
 
@@ -187,14 +187,14 @@ function runmodel()
         error("Invalid area: \"$area_str\". Valid options are SE1, SE2, SE3, SE4, all.")
     end
 
-    output_path = raw"C:\Users\corte\Documents\GridHome\Output\lowtariff"
+    output_path = joinpath(OUTPUT_PATH, "Seed$(RANDOM_SEED)")
 
     all_results = Dict{Tuple{Symbol,Symbol}, DataFrame}()
 
     for area in chosen_areas
         println("\n=============================== Running model for area: $area with collective tariff ==============================")
         
-        output_folder = joinpath(output_path, "ThereseRuns", "Seed$(RANDOM_SEED)_$(area)_Tariff3")
+        output_folder = joinpath(output_path, "AllRuns", "Seed$(RANDOM_SEED)_$(area)_Tariff3")
         !isdir(output_folder) && mkpath(output_folder)
 
         model, params, vars, constraints = makemodel(area, solver)
@@ -229,6 +229,7 @@ function runmodel()
                 load             = [round(loadHH[h][t],                              digits=2) for t in TIME],
                 buy              = [round(value(Buy[h,t]),                            digits=2) for t in TIME],
                 baseline         = [round(loadHH[h][t] + logged_chargeEV[h][t],      digits=2) for t in TIME],
+                optimized        = [round(value(Buy[h,t]),                            digits=2) for t in TIME], # temporarily defined like this, since Sell[h,t] is not defined in the current model
                 demand_ev        = [round(driving_demandEV[h][t],                     digits=2) for t in TIME],
                 logged_ev        = [round(logged_chargeEV[h][t],                      digits=2) for t in TIME],
                 charge_ev        = [round(value(ChargeEV[h,t]) * eta_chargeEV,        digits=2) for t in TIME],
@@ -236,7 +237,7 @@ function runmodel()
                 soc_ev           = [round(value(SocEV[h,t]),                          digits=2) for t in TIME],
             )
 
-            output_file = joinpath(output_folder, "GridHome_Therese_$(area)_$(h)_EV_$(ev_id)_Tariff3.csv")
+            output_file = joinpath(output_folder, "GridHome_$(area)_$(h)_EV_$(ev_id)_Tariff3.csv")
             CSV.write(output_file, results_df)
             println("$h → $(output_file)")
 

@@ -167,7 +167,7 @@ function runmodel()
     (; price, profiles, facility_df) = read_input_data()
     load_profiles = collect(Base.axes(profiles.loadHH, 2))
 
-    ev_folder = joinpath(raw"C:\Users\corte\Documents\GridHome\Input", "ev_data")
+    ev_folder = joinpath(INPUT_PATH, "ev_data")
     good_ids = JSON3.read(read(joinpath(ev_folder, "EVs_charging_at_home.txt"), String), Vector{String})
 
     # After loading good_ids:
@@ -175,14 +175,14 @@ function runmodel()
     Random.seed!(RANDOM_SEED)
     ev_assignment = Dict(zip(load_profiles, shuffle(good_ids)))
 
-    output_path = raw"C:\Users\corte\Documents\GridHome\Output\Seed12"
+    output_path = joinpath(OUTPUT_PATH, "Seed$(RANDOM_SEED)")
 
     all_results = Dict{Symbol, DataFrame}()
 
     for area in chosen_areas
         println("\n=============================== Running model for area: $area with tariff: $tariff ==============================")
 
-        output_folder = joinpath(output_path, "ThereseRuns", "Seed$(RANDOM_SEED)_$(area)_Tariff$(tariff)")
+        output_folder = joinpath(output_path, "AllRuns", "Seed$(RANDOM_SEED)_$(area)_Tariff$(tariff)")
         !isdir(output_folder) && mkpath(output_folder)
 
         for (i, load_profile) in enumerate(load_profiles)
@@ -226,6 +226,7 @@ function runmodel()
             load_vals             = [round(value(loadHH[t]),                   digits=2) for t in TIME]
             buy_vals              = [round(value(Buy[t]),                      digits=2) for t in TIME]
             baseline_vals         = [round(loadHH[t] + logged_chargeEV[t],     digits=2) for t in TIME]
+            optimized_vals        = [round(value(Buy[t]),                      digits=2) for t in TIME] # temporarily defined like this, since Sell[t] is not defined in the current model
             demand_ev_vals        = [round(driving_demandEV[t],                digits=2) for t in TIME]
             logged_ev_vals        = [round(logged_chargeEV[t],                 digits=2) for t in TIME]
             charge_ev_vals        = [round(value(ChargeEV[t]) * eta_chargeEV,                 digits=2) for t in TIME]
@@ -237,6 +238,7 @@ function runmodel()
                 load             = load_vals,
                 buy              = buy_vals,
                 baseline         = baseline_vals,
+                optimized        = optimized_vals,
                 demand_ev        = demand_ev_vals,
                 logged_ev        = logged_ev_vals,
                 charge_ev        = charge_ev_vals,
@@ -244,7 +246,7 @@ function runmodel()
                 soc_ev           = soc_ev_vals,
             )
 
-            output_file = joinpath(output_folder, "GridHome_Therese_$(area)_$(load_profile)_with_EV_$(ev_id)_fuselim_$(tariff).csv")
+            output_file = joinpath(output_folder, "GridHome_$(area)_$(load_profile)_EV_$(ev_id)_Tariff$(tariff).csv")
             CSV.write(output_file, results_df)
             println("Total cost = $total_cost  →  $(output_file)")
 

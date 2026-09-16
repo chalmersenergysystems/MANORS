@@ -235,7 +235,7 @@ function runmodel()
     print("How many EVs? (0–3): ")
     n_ev = parse(Int, strip(readline()))
     (n_ev < 0 || n_ev > 3) && error("Invalid number of EVs: $n_ev. Must be 0–3.")
-    ev_folder = joinpath(raw"C:\Users\corte\Documents\GridHome\Input", "ev_data")
+    ev_folder = joinpath(INPUT_PATH, "ev_data")
     good_ids = JSON3.read(read(joinpath(ev_folder, "EVs_charging_at_home.txt"), String), Vector{String})
     ev_ids = Symbol.(shuffle(good_ids)[1:n_ev])
     isempty(ev_ids) ? println("No EVs selected.") : println("Selected EVs: $(join(ev_ids, ", "))")
@@ -306,7 +306,7 @@ function runmodel()
         results_df[!, "soc_ev_$i"]           = [round(value(SocEV[t, ev]),          digits=2) for t in TIME]
     end
 
-    output_path = raw"C:\Users\corte\Documents\GridHome\Output\SingleRuns"
+    output_path = joinpath(OUTPUT_PATH, "SingleRuns")
     bess_suffix = use_bess ? "" : "_NoBESS"
     ev_suffix = (n_ev == 0) ? "" : "_$(n_ev)EV"
     v2g_suffix = isnothing(v2g_id) ? "" : "_V2G"
