@@ -1,10 +1,12 @@
 # MANORS
 
-**MANORS** (Model Architecture for Netload Optimisation in Residential Systems) is an optimization model for household electricity costs with EV charging, used to study how different grid/network tariff designs affect residential electricity bills and EV charging behavior across the four Swedish bidding areas (SE1-SE4).
+**MANORS** (Model Architecture for Netload Optimisation in Residential Systems) is a modular optimization framework for household electricity costs, used to study how different grid/network tariff designs and technologies affect residential electricity bills and demand-side behavior across the four Swedish bidding areas (SE1-SE4).
 
 ## Description
 
-The model minimizes a household's (or a group of households') total annual electricity cost, consisting of electricity purchase cost (based on hourly area spot prices), public EV charging cost, and a monthly power tariff. The household is subject to a main fuse limit, an EV battery state-of-charge balance, and EV home/away availability profiles.
+MANORS is built around a shared optimization architecture (`makeparameters()`, `makevariables()`, `makeconstraints()`, `makemodel()`, `runmodel()`) that minimizes a household's (or a group of households') total annual electricity cost. Individual technology modules and tariff designs can be added, swapped, or removed on top of this shared core without changing its overall structure.
+
+The two model versions currently implemented in this framework both focus on **EV charging**: they minimize electricity purchase cost (based on hourly area spot prices), public EV charging cost, and a monthly power tariff, subject to a main fuse limit, an EV battery state-of-charge balance, and EV home/away availability profiles. Other technology modules — such as the earlier PV generation + home battery (BESS) variant kept in [MANORS_loop.jl](src/MANORS_loop.jl)/[MANORS_multithread.jl](src/MANORS_multithread.jl) — are examples of the kind of add-on modules the framework is designed to accommodate.
 
 Input data (load profiles, facility/fuse metadata, EV mobility and charging data, and electricity prices) is read from `Input/`, and results are written as CSV files to `Output/`.
 
@@ -15,11 +17,11 @@ The following are the main scripts, found in [`src`](src):
 + collective power tariff model ([MANORS_collectivetariff.jl](src/MANORS_collectivetariff.jl))
 + results post-processing ([postprocess.jl](src/postprocess.jl))
 + plotting script ([plot_profiles.py](src/plot_profiles.py))
-+ other work-in-progress versions of the model ([MANORS_singlerun.jl], [MANORS_loop.jl], [MANORS_multithread.jl])
++ other work-in-progress modules/versions of the framework ([MANORS_singlerun.jl], [MANORS_loop.jl], [MANORS_multithread.jl])
 
-## Model versions
+## Model configurations
 
-This repository currently centers around two versions of the model, sharing the same optimization architecture (`makeparameters()`, `makevariables()`, `makeconstraints()`, `makemodel()`, `runmodel()`) but differing in how the power tariff is applied.
+This repository currently centers around two configurations built on the shared framework, differing in how the power tariff is applied. As the framework grows, further configurations may add or remove technology modules (e.g. PV, home batteries) alongside or instead of EV charging.
 
 ### Individual power tariff ([MANORS_powertariff.jl](src/MANORS_powertariff.jl))
 
