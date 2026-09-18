@@ -246,7 +246,7 @@ function runmodel()
                 soc_ev           = soc_ev_vals,
             )
 
-            output_file = joinpath(output_folder, "GridHome_$(area)_$(load_profile)_EV_$(ev_id)_Tariff$(tariff).csv")
+            output_file = joinpath(output_folder, "MANORS_$(area)_$(load_profile)_EV_$(ev_id)_Tariff$(tariff).csv")
             CSV.write(output_file, results_df)
             println("Total cost = $total_cost  →  $(output_file)")
 

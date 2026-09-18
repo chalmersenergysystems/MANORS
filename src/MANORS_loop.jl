@@ -189,8 +189,8 @@ function runmodel()
     all_gen_profiles = collect(Base.axes(profiles.genPV, 2))
 
     output_path  = OUTPUT_PATH
-    # output_file  = joinpath(output_path, "GridHome_results_all.csv")  # not used for now
-    netload_file = joinpath(output_path, "GridHome_netload_$(area).csv")
+    # output_file  = joinpath(output_path, "MANORS_results_all.csv")  # not used for now
+    netload_file = joinpath(output_path, "MANORS_netload_$(area).csv")
 
     # isfile(output_file)  && rm(output_file)   # not used for now
     isfile(netload_file) && rm(netload_file)

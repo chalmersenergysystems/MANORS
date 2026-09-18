@@ -237,7 +237,7 @@ function runmodel()
                 soc_ev           = [round(value(SocEV[h,t]),                          digits=2) for t in TIME],
             )
 
-            output_file = joinpath(output_folder, "GridHome_$(area)_$(h)_EV_$(ev_id)_Tariff3.csv")
+            output_file = joinpath(output_folder, "MANORS_$(area)_$(h)_EV_$(ev_id)_Tariff3.csv")
             CSV.write(output_file, results_df)
             println("$h → $(output_file)")
 

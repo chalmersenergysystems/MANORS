@@ -310,10 +310,10 @@ function runmodel()
     bess_suffix = use_bess ? "" : "_NoBESS"
     ev_suffix = (n_ev == 0) ? "" : "_$(n_ev)EV"
     v2g_suffix = isnothing(v2g_id) ? "" : "_V2G"
-    output_file = joinpath(output_path, "GridHome_final_singlerun_$(load_profile)_$(gen_profile)_$(region)$(bess_suffix)$(ev_suffix)$(v2g_suffix).csv")
+    output_file = joinpath(output_path, "MANORS_final_singlerun_$(load_profile)_$(gen_profile)_$(region)$(bess_suffix)$(ev_suffix)$(v2g_suffix).csv")
     CSV.write(output_file, results_df)
 
-    summary_file = joinpath(output_path, "GridHome_final_singlerun_$(load_profile)_$(gen_profile)_$(region)$(bess_suffix)$(ev_suffix)$(v2g_suffix)_summary.txt")
+    summary_file = joinpath(output_path, "MANORS_final_singlerun_$(load_profile)_$(gen_profile)_$(region)$(bess_suffix)$(ev_suffix)$(v2g_suffix)_summary.txt")
 
     open(summary_file, "w") do f
         println(f, "Single Run: region=$region | load=$load_profile | fuse=$(fuse_size)A | bess=$bess_type | gen=$gen_profile | $(ev_suffix)= $EV $(v2g_suffix)") 

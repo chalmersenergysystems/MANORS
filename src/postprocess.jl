@@ -4,24 +4,24 @@ include(joinpath(@__DIR__, "inputdata.jl"))
 
 # ==============================================================================================
 # Terminology used throughout this file (as defined in the README):
-#   "individual power tariff" model (GridHome_powertariff.jl), tariff ∈ {0,1,2} (No Tariff /
+#   "individual power tariff" model (MANORS_powertariff.jl), tariff ∈ {0,1,2} (No Tariff /
 #     Daytime Tariff / All Hours Tariff). Each household is optimized independently, with its
 #     own fuse-based connection limit.
-#   "collective power tariff" model (GridHome_collectivetariff.jl), tariff == 3 (Collective
+#   "collective power tariff" model (MANORS_collectivetariff.jl), tariff == 3 (Collective
 #     Tariff). All households in an area are optimized jointly, sharing one grid connection.
 #
 # Both models write one CSV per household to the same folder layout:
 #   OUTPUT_PATH/Seed<seed>/AllRuns/Seed<seed>_<area>_Tariff<tariff>/
-#       GridHome_<area>_<profile>_EV_<ev_id>_Tariff<tariff>.csv
+#       MANORS_<area>_<profile>_EV_<ev_id>_Tariff<tariff>.csv
 # so the "CURRENT" functions below treat the individual (tariff 0-2) and collective (tariff 3)
 # models uniformly — only the tariff number differs.
 # ==============================================================================================
 
 # ------------------------------------------------------------------------------------------
-# OBSOLETE — these two functions belong to the earlier PV+BESS pipeline (GridHome_loop.jl /
-# GridHome_multithread.jl), which optimizes household load against solar generation (genPV)
+# OBSOLETE — these two functions belong to the earlier PV+BESS pipeline (MANORS_loop.jl /
+# MANORS_multithread.jl), which optimizes household load against solar generation (genPV)
 # and a home battery (BESS); it has no EV and no power tariff, and is unrelated to the
-# current individual/collective tariff models. They read/write "GridHome_netload_<region>.csv"
+# current individual/collective tariff models. They read/write "MANORS_netload_<region>.csv"
 # and "run_<i>_load..._bess..._gen..." named columns that those models never produce.
 # Kept only for reference — not updated to the current model/folder structure.
 # ------------------------------------------------------------------------------------------
@@ -33,7 +33,7 @@ function load_profiles(region::String)
 
     # Read generation profiles and results from CSV files
     genPV_df   = CSV.read(joinpath(synth_path, "pv_profiles_$(region).csv"), DataFrame)
-    results_df = CSV.read(joinpath(output_path, "GridHome_netload_$(region).csv"), DataFrame)
+    results_df = CSV.read(joinpath(output_path, "MANORS_netload_$(region).csv"), DataFrame)
 
     # Clean up dataframes
     genPV_df   = df_cleanup!(genPV_df)
@@ -57,7 +57,7 @@ function build_profiles()
     load_df = df_cleanup!(load_df)
 
     # Discover regions from netload files
-    netload_files = filter(f -> startswith(f, "GridHome_netload_") && endswith(f, ".csv"),
+    netload_files = filter(f -> startswith(f, "MANORS_netload_") && endswith(f, ".csv"),
                            readdir(output_path))
 
     # Define naming pattern
@@ -65,7 +65,7 @@ function build_profiles()
     uuid_pattern = r"run_\d+_load([a-f0-9\-]+)_bess.+_gen(x(?:[1-9]\d{0,2}|1000))"
 
     for file in netload_files
-        region = replace(file, "GridHome_netload_" => "", ".csv" => "")
+        region = replace(file, "MANORS_netload_" => "", ".csv" => "")
         println("Processing region: $region")
 
         # Read input data
@@ -96,13 +96,13 @@ function build_profiles()
         end
 
         # Save to CSV
-        CSV.write(joinpath(output_path, "GridHome_dummyloads_$(region).csv"), dummy_netloads)
+        CSV.write(joinpath(output_path, "MANORS_dummyloads_$(region).csv"), dummy_netloads)
     end
 end
 
 # ------------------------------------------------------------------------------------------
-# CURRENT — postprocessing pipeline for the individual (GridHome_powertariff.jl, tariff 0-2)
-# and collective (GridHome_collectivetariff.jl, tariff 3) power tariff models. Run in this order:
+# CURRENT — postprocessing pipeline for the individual (MANORS_powertariff.jl, tariff 0-2)
+# and collective (MANORS_collectivetariff.jl, tariff 3) power tariff models. Run in this order:
 #   1. build_netload_profiles(seed)             — adds an `optimized` column to every raw run CSV
 #   2. collect_results(seed, tariff, area), or interactively collect_results()
 #                                                — aggregates all households in an area into
@@ -196,7 +196,7 @@ function collect_results(seed::Int, tariff::Int, area::String)
         df = CSV.read(fpath, DataFrame)
         cn = Symbol("x$i")
 
-        # Filename pattern (both individual and collective tariff models): GridHome_<area>_<profile>_EV_<ev_id>_Tariff<tariff>.csv
+        # Filename pattern (both individual and collective tariff models): MANORS_<area>_<profile>_EV_<ev_id>_Tariff<tariff>.csv
         m = Base.match(Regex("_EV_(.+?)_Tariff$(tariff)\\.csv\$"), basename(fpath))
         ev_id = m !== nothing ? m[1] : "unknown"
         push!(ev_mapping, (cn, ev_id))

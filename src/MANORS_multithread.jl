@@ -1,7 +1,7 @@
 using JuMP, HiGHS, Gurobi, PrettyTables, CSV, DataFrames, Random
 const AxisArray = Containers.DenseAxisArray
 
-include(joinpath(@__DIR__, "GridHome_loop.jl"))
+include(joinpath(@__DIR__, "MANORS_loop.jl"))
 
 function runmodel_multithread()
     # Prompt for area selection
@@ -193,7 +193,7 @@ function runmodel_multithread()
                     println("No results for region $region, skipping.")
                     continue
                 end
-                netload_file = joinpath(output_path, "GridHome_netload_$(region).csv")
+                netload_file = joinpath(output_path, "MANORS_netload_$(region).csv")
                 netload_df   = DataFrame(time = collect(1:35040))
                 for i in region_indices
                     run_label, netload_vals = results[i]
