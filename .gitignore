@@ -3,6 +3,7 @@ Output/
 Plots/
 *.csv
 *.xlsx
+*.md
 Manifest.toml
 workspace.jl
 help.jl
