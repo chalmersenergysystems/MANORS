@@ -25,7 +25,7 @@ This repository currently centers around two configurations built on the shared 
 
 ### Individual power tariff ([MANORS_powertariff.jl](src/MANORS_powertariff.jl))
 
-Each household is optimized **independently**, one at a time, with its own EV assigned to it (randomly, but reproducibly via `RANDOM_SEED`).
+Each household is optimized **independently**, one at a time, with its own EV(s) assigned to it (1 or 2 per household, randomly but reproducibly via `RANDOM_SEED`). If there are fewer EV profiles than needed, the EV list is reshuffled (seeded) and reused for further households; the EVs of one household are always different. With 2 EVs, only households with a fuse size above 16A are run (16A households cannot generally handle 2 EVs).
 
 * Main fuse limit (`maxpower`) is based on the household's own contracted fuse size.
 * A monthly peak (`Peak[m]`) is tracked per household and penalized with a power tariff, `power_tariff`, with three selectable options:
@@ -87,6 +87,7 @@ runmodel()
 1. **Solver** — `HiGHS` or `Gurobi`
 2. **Area** — `SE1`, `SE2`, `SE3`, `SE4`, or `all`
 3. **Tariff option** (individual power tariff version only) — `0` (No Tariff), `1` (Daytime Tariff), or `2` (All Hours Tariff)
+4. **Number of EVs per household** (individual power tariff version only) — `1` or `2`
 
 ### Output
 
@@ -104,6 +105,8 @@ Each run produces one CSV file per household (and its assigned EV), named `MANOR
 | `charge_ev`         | Optimized home EV charging (kWh/15-min)                     |
 | `public_charge_ev`  | Optimized public EV charging (kWh/15-min)                   |
 | `soc_ev`            | EV battery state of charge (kWh)                            |
+
+With 2 EVs per household (individual power tariff version), the five EV columns are written per EV with suffixes `_1` and `_2` (e.g. `charge_ev_1`, `charge_ev_2`), `baseline` includes the logged charging of both EVs, the file name lists both EVs (`EV_<ev_1>_<ev_2>`) and the output folder gets a `_2EV` suffix (`Seed<seed>_<area>_Tariff<tariff>_2EV`).
 
 Files are saved under `Output/Seed<seed>/AllRuns/Seed<seed>_<area>_Tariff<tariff>/` (individual power tariff, `tariff` = 0/1/2) or `Output/Seed<seed>/AllRuns/Seed<seed>_<area>_Tariff3/` (collective power tariff) — see [Post-processing](#post-processing) below to aggregate and visualize results.
 

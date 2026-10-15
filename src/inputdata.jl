@@ -102,8 +102,8 @@ function read_input_data()
     facility_df = CSV.read(joinpath(input_path, "facility.csv"), DataFrame)
 
     # Read consumption profiles from CSV files
-    loadAPT_df = CSV.read(joinpath(input_path, "APT_sampled_profiles_merged.csv"), DataFrame)
-    loadHH_df = CSV.read(joinpath(input_path, "HH_selected_profiles.csv"), DataFrame)
+    loadAPT_df = CSV.read(joinpath(input_path, "all_fuse_safe_apts.csv"), DataFrame)
+    loadHH_df = CSV.read(joinpath(input_path, "all_fuse_safe_houses.csv"), DataFrame)
     # println(names(loadHH_df))
 
     # Clean up dataframes
