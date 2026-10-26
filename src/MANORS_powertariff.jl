@@ -7,10 +7,13 @@ export makeparameters, makevariables, makeconstraints, makemodel, runmodel, prin
 include(joinpath(@__DIR__, "inputdata.jl"))
 include(joinpath(@__DIR__, "house_selection.jl"))
 
-# ev_shifts: whole-week time shift per EV (EVs reused across houses, see make_house_selection); 0 if not given
-function makeparameters(load_profile, fuse_size, area::Symbol, ev_ids::Vector{Symbol}, tariff::Int; ev_shifts=Dict{Symbol, Int}())
-    (; price, profiles, avg_power_tariff) = read_input_data()
-    (; battery_cap, homeshare, tripenergy, chargeenergy, charger_power, public_charger_power, cost_public_charge, eta_chargeEV) = read_EV_data()
+# ev_shifts: whole-week time shift per EV (EVs reused across houses, see make_house_selection); 0 if not given.
+# inputs / evdata: the results of read_input_data() / read_EV_data(); runmodel reads them once and passes them on
+# (reading them for every house took most of the run time). Read here only if not given.
+function makeparameters(load_profile, fuse_size, area::Symbol, ev_ids::Vector{Symbol}, tariff::Int;
+                        ev_shifts=Dict{Symbol, Int}(), inputs=read_input_data(), evdata=read_EV_data())
+    (; price, profiles, avg_power_tariff) = inputs
+    (; battery_cap, homeshare, tripenergy, chargeenergy, charger_power, public_charger_power, cost_public_charge, eta_chargeEV) = evdata
 
     # --- Model sets ---
     TIME = 1:35040
@@ -122,11 +125,12 @@ function set_solver(solver::Symbol)
     end
 end
 
-function makemodel(load_profile, fuse_size, area::Symbol, solver::Symbol, ev_ids::Vector{Symbol}, tariff::Int; ev_shifts=Dict{Symbol, Int}())
+function makemodel(load_profile, fuse_size, area::Symbol, solver::Symbol, ev_ids::Vector{Symbol}, tariff::Int;
+                   ev_shifts=Dict{Symbol, Int}(), inputs=read_input_data(), evdata=read_EV_data())
     optimizer = set_solver(solver)
     model = Model(optimizer)
 
-    params = makeparameters(load_profile, fuse_size, area, ev_ids, tariff; ev_shifts)
+    params = makeparameters(load_profile, fuse_size, area, ev_ids, tariff; ev_shifts, inputs, evdata)
     vars = makevariables(model, params)
     constraints = makeconstraints(model, vars, params)
 
@@ -189,6 +193,11 @@ function runmodel()
         println("Using the final house selection: $n_target houses ($(final_selection_file(RANDOM_SEED))).")
     end
 
+    # Read the input data once for all houses
+    println("Reading input data...")
+    inputs = read_input_data()
+    evdata = read_EV_data()
+
     output_path = joinpath(OUTPUT_PATH, "Seed$(RANDOM_SEED)")
     ev_suffix = n_ev == 1 ? "" : "_$(n_ev)EV"
 
@@ -213,7 +222,7 @@ function runmodel()
                     "EV=$(join([ev_name(e, s) for (e, s) in spec], ", "))")
             println("----------------------------------------------------------------------------------------------------------------------")
 
-            model, params, vars, constraints = makemodel(load_profile, fuse_size, area, solver, ev_ids, tariff; ev_shifts)
+            model, params, vars, constraints = makemodel(load_profile, fuse_size, area, solver, ev_ids, tariff; ev_shifts, inputs, evdata)
 
             (; loadHH, EV, driving_demandEV, logged_chargeEV, eta_chargeEV, TIME) = params
             (; Buy, ChargeEV, PublicChargeEV, SocEV, TotCost) = vars
