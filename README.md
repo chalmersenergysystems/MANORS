@@ -25,9 +25,13 @@ This repository currently centers around two configurations built on the shared 
 
 ### Individual power tariff ([MANORS_powertariff.jl](src/MANORS_powertariff.jl))
 
-Each household is optimized **independently**, one at a time, with its own EV(s) assigned to it (1 or 2 per household, randomly but reproducibly via `RANDOM_SEED`). If there are fewer EV profiles than needed, the EV list is reshuffled (seeded) and reused for further households; the EVs of one household are always different. With 2 EVs, only households with a fuse size above 16A are run (16A households cannot generally handle 2 EVs).
+Each household is optimized **independently**, one at a time, with its own EV(s) assigned to it (1 or 2 per household). Households and EVs come from one shared selection ([house_selection.jl](src/house_selection.jl)), so that all runs (tariffs, areas, 1 or 2 EVs) use the same households in the same order, and a household with 2 EVs keeps the EV it has in the 1-EV runs as its first EV:
+
+* `make_house_selection(n_houses=...)` writes `Input/house_selection_seed<seed>.csv`: all households with a known fuse size in a random (seeded) order, each with two different EVs. If there are fewer EV profiles than needed, they are reused with a whole-week time shift (0, +1, -1, +2, -2 weeks, ...), so a reused car charges on other days.
+* The first 2-EV run goes through this list and keeps the first `n_houses` households that solve; they are saved as `Input/house_selection_seed<seed>_final.csv` and used by all later runs (1-EV runs use each household's first EV). Households of all fuse sizes, also 16A, get 2 EVs.
 
 * Main fuse limit (`maxpower`) is based on the household's own contracted fuse size.
+* One home charger per household (`charger_power`, 11 kW): with 2 EVs, the cars share it (split the power or take turns).
 * A monthly peak (`Peak[m]`) is tracked per household and penalized with a power tariff, `power_tariff`, with three selectable options:
     * `0` — No Tariff: no additional cost.
     * `1` — Daytime Tariff: only applies to peaks occurring 7 am-8 pm.
@@ -72,7 +76,8 @@ Navigate to the repository root and include the desired script, then call `runmo
 cd("path/to/MANORS")
 
 include("src/MANORS_powertariff.jl")
-runmodel()
+make_house_selection(n_houses=1000)    # once: candidate households and EVs (individual power tariff version)
+runmodel()                              # first run: 2 EVs (fixes the households), then any other run
 ```
 
 or for the collective version:
@@ -106,7 +111,7 @@ Each run produces one CSV file per household (and its assigned EV), named `MANOR
 | `public_charge_ev`  | Optimized public EV charging (kWh/15-min)                   |
 | `soc_ev`            | EV battery state of charge (kWh)                            |
 
-With 2 EVs per household (individual power tariff version), the five EV columns are written per EV with suffixes `_1` and `_2` (e.g. `charge_ev_1`, `charge_ev_2`), `baseline` includes the logged charging of both EVs, the file name lists both EVs (`EV_<ev_1>_<ev_2>`) and the output folder gets a `_2EV` suffix (`Seed<seed>_<area>_Tariff<tariff>_2EV`).
+With 2 EVs per household (individual power tariff version), the five EV columns are written per EV with suffixes `_1` and `_2` (e.g. `charge_ev_1`, `charge_ev_2`), `baseline` includes the logged charging of both EVs, the file name lists both EVs (`EV_<ev_1>_<ev_2>`) and the output folder gets a `_2EV` suffix (`Seed<seed>_<area>_Tariff<tariff>_2EV`). A reused, time-shifted EV appears in file names with its shift, e.g. `b32w+1`.
 
 Files are saved under `Output/Seed<seed>/AllRuns/Seed<seed>_<area>_Tariff<tariff>/` (individual power tariff, `tariff` = 0/1/2) or `Output/Seed<seed>/AllRuns/Seed<seed>_<area>_Tariff3/` (collective power tariff) — see [Post-processing](#post-processing) below to aggregate and visualize results.
 
@@ -115,7 +120,7 @@ Files are saved under `Output/Seed<seed>/AllRuns/Seed<seed>_<area>_Tariff<tariff
 [postprocess.jl](src/postprocess.jl) aggregates the per-household CSVs written by the two tariff models above. Run in this order:
 
 1. `build_netload_profiles(seed)` — adds an `optimized` (net grid draw) column to every raw per-household run CSV.
-2. `collect_results(seed, tariff, area)`, or interactively `collect_results()` — aggregates all households in an area into per-metric wide CSVs (one column per household), written to `Output/Seed<seed>/Aggregates/Seed<seed>_Tariff<tariff>/`.
+2. `collect_results(seed, tariff, area; n_ev=1)`, or interactively `collect_results()` — aggregates all households in an area into per-metric wide CSVs (one column per household), written to `Output/Seed<seed>/Aggregates/Seed<seed>_Tariff<tariff>/` (`n_ev=2`: the 2-EV runs, folders with suffix `_2EV`). With a final household selection, the columns follow its order (the same households in the same order for every tariff, area and number of EVs), and `<area>_ev_mapping.csv` gives the household and EV(s) of each column.
 3. `find_peaks()` — cross-seed summary of monthly peak (import) and dip (export) power per area/household, written to `Output/Aggregates/Summary/`.
 4. `compare_tariffs_monthly()` — compact monthly peak/dip comparison across all 4 tariff options (No/Daytime/All Hours/Collective Tariff).
 5. `average_areas(seed, tariff)` — averages a seed's per-area aggregates (SE1-SE4) into a single Sweden-wide series.

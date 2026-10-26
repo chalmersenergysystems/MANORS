@@ -1,6 +1,7 @@
 using DataFrames, CSV, Statistics
 
 include(joinpath(@__DIR__, "inputdata.jl"))
+include(joinpath(@__DIR__, "house_selection.jl"))
 
 # ==============================================================================================
 # Terminology used throughout this file (as defined in the README):
@@ -147,13 +148,17 @@ function build_netload_profiles(seed::Int)
     end
 end
 
-function collect_results(seed::Int, tariff::Int, area::String)
+function collect_results(seed::Int, tariff::Int, area::String; n_ev::Int=1)
     # Aggregates all per-household CSVs for one seed/tariff/area into per-metric wide CSVs
     # (one column per household) plus a one-day percentage breakdown. Works for both the
     # individual tariff model (tariff 0-2) and the collective tariff model (tariff 3), since
-    # they share the same per-household file naming.
-    folder     = joinpath(OUTPUT_PATH, "Seed$(seed)", "AllRuns", "Seed$(seed)_$(area)_Tariff$(tariff)")
-    agg_folder = joinpath(OUTPUT_PATH, "Seed$(seed)", "Aggregates", "Seed$(seed)_Tariff$(tariff)")
+    # they share the same per-household file naming. n_ev = 2: the 2-EV runs (folders with suffix _2EV).
+    # If a final house selection exists (house_selection.jl), the columns follow its order, so every case and
+    # 1 / 2 EVs list the same households in the same order (needed by REGAL); <area>_ev_mapping.csv gives the
+    # household (profile) and EV(s) of each column.
+    ev_suffix  = n_ev == 1 ? "" : "_$(n_ev)EV"
+    folder     = joinpath(OUTPUT_PATH, "Seed$(seed)", "AllRuns", "Seed$(seed)_$(area)_Tariff$(tariff)$(ev_suffix)")
+    agg_folder = joinpath(OUTPUT_PATH, "Seed$(seed)", "Aggregates", "Seed$(seed)_Tariff$(tariff)$(ev_suffix)")
     !isdir(agg_folder) && mkpath(agg_folder)
 
     isdir(folder) || error("Folder not found: $folder")
@@ -161,6 +166,16 @@ function collect_results(seed::Int, tariff::Int, area::String)
     # Read all CSV files in the folder
     csv_files = filter(f -> endswith(f, ".csv"), readdir(folder, join=true))
     isempty(csv_files) && error("No CSV files found in $folder")
+    profile_of(f) = (m = Base.match(Regex("^MANORS_$(area)_(.+?)_EV_"), basename(f)); m === nothing ? "" : String(m[1]))
+    selection = read_final_selection(seed)
+    if selection !== nothing
+        rank = Dict(p => i for (i, p) in enumerate(selection.profile))
+        missing_houses = setdiff(selection.profile, profile_of.(csv_files))
+        isempty(missing_houses) || @warn "$(length(missing_houses)) houses of the final selection have no result in $folder."
+        extra = filter(f -> !haskey(rank, profile_of(f)), csv_files)
+        isempty(extra) || @warn "$(length(extra)) result files in $folder are not in the final selection, left out."
+        csv_files = sort(filter(f -> haskey(rank, profile_of(f)), csv_files), by=f -> rank[profile_of(f)])
+    end
 
     # Get baseline timeline information
     first_df = CSV.read(first(csv_files), DataFrame)
@@ -189,7 +204,7 @@ function collect_results(seed::Int, tariff::Int, area::String)
     dfs = Dict(key => DataFrame(time = times) for (_, key, _) in metrics_config)
     
     all_sums = DataFrame(time = times)
-    ev_mapping = DataFrame(profile = Symbol[], ev_id = String[])
+    ev_mapping = DataFrame(profile = Symbol[], household = String[], ev_id = String[])
 
     # Loop through and populate files
     for (i, fpath) in enumerate(csv_files)
@@ -199,7 +214,7 @@ function collect_results(seed::Int, tariff::Int, area::String)
         # Filename pattern (both individual and collective tariff models): MANORS_<area>_<profile>_EV_<ev_id>_Tariff<tariff>.csv
         m = Base.match(Regex("_EV_(.+?)_Tariff$(tariff)\\.csv\$"), basename(fpath))
         ev_id = m !== nothing ? m[1] : "unknown"
-        push!(ev_mapping, (cn, ev_id))
+        push!(ev_mapping, (cn, profile_of(fpath), ev_id))
 
         # Check the source columns and populate the dataframes
         for (_, key, csv_col) in metrics_config

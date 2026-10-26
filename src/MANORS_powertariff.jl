@@ -5,8 +5,10 @@ const GRB_ENV = Gurobi.Env(output_flag = 0)
 export makeparameters, makevariables, makeconstraints, makemodel, runmodel, printtable
 
 include(joinpath(@__DIR__, "inputdata.jl"))
+include(joinpath(@__DIR__, "house_selection.jl"))
 
-function makeparameters(load_profile, fuse_size, area::Symbol, ev_ids::Vector{Symbol}, tariff::Int)
+# ev_shifts: whole-week time shift per EV (EVs reused across houses, see make_house_selection); 0 if not given
+function makeparameters(load_profile, fuse_size, area::Symbol, ev_ids::Vector{Symbol}, tariff::Int; ev_shifts=Dict{Symbol, Int}())
     (; price, profiles, avg_power_tariff) = read_input_data()
     (; battery_cap, homeshare, tripenergy, chargeenergy, charger_power, public_charger_power, cost_public_charge, eta_chargeEV) = read_EV_data()
 
@@ -21,10 +23,12 @@ function makeparameters(load_profile, fuse_size, area::Symbol, ev_ids::Vector{Sy
 
     # EV parameters (per-EV Dicts; empty Dicts when EV = Symbol[])
     EV               = ev_ids
+    shift(ev)        = get(ev_shifts, ev, 0) * WEEK_STEPS                  # circular shift by whole weeks (keeps weekdays)
     sizeEV           = Dict(ev => battery_cap[battery_cap.id .== String(ev), :capacity_kWh][1] for ev in EV)
-    home             = Dict(ev => homeshare[TIME, ev]    for ev in EV)
-    driving_demandEV = Dict(ev => tripenergy[TIME, ev]   for ev in EV)
-    logged_chargeEV  = Dict(ev => chargeenergy[TIME, ev] for ev in EV)
+    series(x, ev)    = circshift([x[t, ev] for t in TIME], shift(ev))     # plain vector over TIME, shifted
+    home             = Dict(ev => series(homeshare, ev)    for ev in EV)
+    driving_demandEV = Dict(ev => series(tripenergy, ev)   for ev in EV)
+    logged_chargeEV  = Dict(ev => series(chargeenergy, ev) for ev in EV)
 
     # Household parameters
     # maxpower = FUSE_TO_POWER[fuse_size]             # kW, add 20 kW to ensure no infeasibility due to the fuse limit (since we want to analyze the effect of the EV without fuse limitations)
@@ -73,7 +77,10 @@ function makeconstraints(model, vars, params)
             SocEV[t == TIME[end] ? TIME[1] : t+1, ev] == SocEV[t, ev] + (ChargeEV[t, ev] * eta_chargeEV) + (PublicChargeEV[t, ev] * eta_chargeEV) - driving_demandEV[ev][t]      # Note: driving demand is NOW positive for energy consumed
 
         LimitChargeEV[t in TIME, ev in EV],
-            ChargeEV[t, ev] <= charger_power / 4 * home[ev][t]                      # kWh/15-min, only when the car is at home (one charger per EV)
+            ChargeEV[t, ev] <= charger_power / 4 * home[ev][t]                      # kWh/15-min, only when the car is at home
+
+        LimitChargeHouse[t in TIME],
+            sum(ChargeEV[t, ev] for ev in EV; init = 0.0) <= charger_power / 4     # kWh/15-min, one charger per house: 2 EVs share it (split or take turns)
 
         LimitPublicChargeEV[t in TIME, ev in EV],
             PublicChargeEV[t, ev] <= public_charger_power / 4 * (1-home[ev][t])     # kWh/15-min, only when the car is NOT at home
@@ -87,8 +94,8 @@ function makeconstraints(model, vars, params)
                     sum(Peak[m] * power_tariff for m in MONTH)
     end
 
-    return (; BalanceHH, BalanceEV, 
-              LimitChargeEV, LimitPublicChargeEV, 
+    return (; BalanceHH, BalanceEV,
+              LimitChargeEV, LimitChargeHouse, LimitPublicChargeEV,
               PeakPower, Totalcosts)
 end
 
@@ -115,11 +122,11 @@ function set_solver(solver::Symbol)
     end
 end
 
-function makemodel(load_profile, fuse_size, area::Symbol, solver::Symbol, ev_ids::Vector{Symbol}, tariff::Int)
+function makemodel(load_profile, fuse_size, area::Symbol, solver::Symbol, ev_ids::Vector{Symbol}, tariff::Int; ev_shifts=Dict{Symbol, Int}())
     optimizer = set_solver(solver)
     model = Model(optimizer)
 
-    params = makeparameters(load_profile, fuse_size, area, ev_ids, tariff)
+    params = makeparameters(load_profile, fuse_size, area, ev_ids, tariff; ev_shifts)
     vars = makevariables(model, params)
     constraints = makeconstraints(model, vars, params)
 
@@ -130,18 +137,6 @@ function makemodel(load_profile, fuse_size, area::Symbol, solver::Symbol, ev_ids
     end
 
     return model, params, vars, constraints
-end
-
-function assign_evs(load_profiles, good_ids::Vector{String}, n_ev::Int)
-    length(good_ids) >= n_ev || error("Only $(length(good_ids)) EV profiles available, cannot assign $n_ev EVs per household.")
-    queue = String[]
-    assignment = Dict{eltype(load_profiles), Vector{Symbol}}()
-    for load_profile in load_profiles
-        # When the queue cannot cover a household, draw a new seeded shuffle of the EVs not already in the queue (no duplicate EVs within a household)
-        length(queue) < n_ev && append!(queue, shuffle(setdiff(good_ids, queue)))
-        assignment[load_profile] = Symbol.(splice!(queue, 1:n_ev))
-    end
-    return assignment
 end
 
 function runmodel()
@@ -175,28 +170,24 @@ function runmodel()
     n_ev = parse(Int, n_ev_str)
     n_ev ∉ (1, 2) && error("Invalid number of EVs: \"$n_ev_str\". Valid options are 1 or 2.")
 
-    # Load input data once
-    (; price, profiles, facility_df) = read_input_data()
-    load_profiles = collect(Base.axes(profiles.loadHH, 2))
-
-    # 16A households cannot handle 2 EVs: keep only households with a known fuse size > 16 A
-    if n_ev == 2
-        fuse_of(lp) = begin
-            row = filter(r -> r.facility_id == String(lp), facility_df)
-            isempty(row) ? missing : row[1, :contract_fuse_size]
-        end
-        n_before = length(load_profiles)
-        load_profiles = filter(lp -> coalesce(fuse_of(lp) > 16, false), load_profiles)
-        println("2 EVs per household: keeping $(length(load_profiles)) of $n_before load profiles (fuse size > 16 A).")
-        isempty(load_profiles) && error("No load profiles with fuse size > 16 A.")
+    # Houses and EVs from the shared selection (house_selection.jl), so that every run (tariff, area, 1 or 2 EVs) has
+    # the same households in the same order and a 2-EV house has the 1-EV house's EV as its first EV. Houses of all
+    # fuse sizes (also 16 A) get 2 EVs; the fuse limit applies in the optimization. The first 2-EV run goes through the
+    # candidates and keeps the first n_houses that solve (final selection); all later runs use exactly those.
+    final = read_final_selection(RANDOM_SEED)
+    if final === nothing
+        isfile(selection_file(RANDOM_SEED)) || error("No house selection: run make_house_selection(n_houses=...) first.")
+        n_ev == 2 || error("No final house selection yet: run 2 EVs first (it fixes the houses for all runs).")
+        houses_df = read_candidates(RANDOM_SEED)
+        n_target = houses_df.n_houses[1]
+        fixing = true
+        println("Fixing the house selection: first $n_target of $(nrow(houses_df)) candidates that solve with 2 EVs.")
+    else
+        houses_df = final
+        n_target = nrow(final)
+        fixing = false
+        println("Using the final house selection: $n_target houses ($(final_selection_file(RANDOM_SEED))).")
     end
-
-    ev_folder = joinpath(INPUT_PATH, "ev_data")
-    good_ids = JSON3.read(read(joinpath(ev_folder, "EVs_charging_at_home.txt"), String), Vector{String})
-
-    length(good_ids) >= n_ev * length(load_profiles) || @warn "Fewer EV profiles ($(length(good_ids))) than needed ($(n_ev * length(load_profiles))) — EVs will be reused across households (new seeded shuffle each time the list is exhausted)."
-    Random.seed!(RANDOM_SEED)
-    ev_assignment = assign_evs(load_profiles, good_ids, n_ev)
 
     output_path = joinpath(OUTPUT_PATH, "Seed$(RANDOM_SEED)")
     ev_suffix = n_ev == 1 ? "" : "_$(n_ev)EV"
@@ -208,26 +199,21 @@ function runmodel()
 
         output_folder = joinpath(output_path, "AllRuns", "Seed$(RANDOM_SEED)_$(area)_Tariff$(tariff)$(ev_suffix)")
         !isdir(output_folder) && mkpath(output_folder)
+        solved = Int[]                                    # rows of houses_df that solved (selection fixing)
 
-        for (i, load_profile) in enumerate(load_profiles)
-            # Look up fuse size
-            facility_row = filter(r -> r.facility_id == String(load_profile), facility_df)
-            if isempty(facility_row)
-                @warn "No facility entry for load profile \"$load_profile\", skipping."
-                continue
-            end
-            fuse_size = facility_row[1, :contract_fuse_size]
-            if ismissing(fuse_size)
-                @warn "Missing fuse size for load profile \"$load_profile\", skipping."
-                continue
-            end
+        for (i, row) in enumerate(eachrow(houses_df))
+            fixing && length(solved) == n_target && break
+            load_profile = Symbol(row.profile)
+            fuse_size = row.fuse
+            spec = ev_spec(row, n_ev)
+            ev_ids = first.(spec)
+            ev_shifts = Dict(spec)
 
-            ev_ids = ev_assignment[load_profile]
-
-            println("\nRun $i/$(length(load_profiles)) | area=$area | load=$load_profile | fuse=$(fuse_size)A | EV=$(join(ev_ids, ", "))")
+            println("\nRun $i/$(fixing ? nrow(houses_df) : n_target) | area=$area | load=$load_profile | fuse=$(fuse_size)A | " *
+                    "EV=$(join([ev_name(e, s) for (e, s) in spec], ", "))")
             println("----------------------------------------------------------------------------------------------------------------------")
 
-            model, params, vars, constraints = makemodel(load_profile, fuse_size, area, solver, ev_ids, tariff)
+            model, params, vars, constraints = makemodel(load_profile, fuse_size, area, solver, ev_ids, tariff; ev_shifts)
 
             (; loadHH, EV, driving_demandEV, logged_chargeEV, eta_chargeEV, TIME) = params
             (; Buy, ChargeEV, PublicChargeEV, SocEV, TotCost) = vars
@@ -241,9 +227,15 @@ function runmodel()
                     iis_model, _ = copy_conflict(model)
                     print(iis_model)
                 end
-                @warn "Model not optimal ($status) for load=$load_profile, EV=$(join(ev_ids, ", ")). Skipping."
+                if fixing
+                    @warn "Model not optimal ($status) for load=$load_profile, EV=$(join(ev_ids, ", ")): house left out of the selection."
+                else
+                    @warn "Model not optimal ($status) for load=$load_profile, EV=$(join(ev_ids, ", ")), a house of the final " *
+                          "selection: this run will NOT have the same houses as the others (REGAL needs matching sets)."
+                end
                 continue
             end
+            fixing && push!(solved, i)
 
             total_cost            = round(value(TotCost),                       digits=2)
             load_vals             = [round(value(loadHH[t]),                   digits=2) for t in TIME]
@@ -269,11 +261,21 @@ function runmodel()
                 results_df[!, "soc_ev$col"]           = [round(value(SocEV[t, ev]),                     digits=2) for t in TIME]
             end
 
-            output_file = joinpath(output_folder, "MANORS_$(area)_$(load_profile)_EV_$(join(ev_ids, "_"))_Tariff$(tariff).csv")
+            output_file = joinpath(output_folder, "MANORS_$(area)_$(load_profile)_EV_$(join([ev_name(e, s) for (e, s) in spec], "_"))_Tariff$(tariff).csv")
             CSV.write(output_file, results_df)
             println("Total cost = $total_cost  →  $(output_file)")
 
             all_results[load_profile] = results_df
+        end
+
+        if fixing
+            # The houses that solved become the final selection for all later runs (also the next areas of this run)
+            length(solved) < n_target && @warn "Only $(length(solved)) of $(nrow(houses_df)) candidates solved, fewer than $n_target."
+            final = houses_df[solved, :]
+            final.order = 1:nrow(final)
+            CSV.write(final_selection_file(RANDOM_SEED), final)
+            println("\nSaved the final house selection ($(nrow(final)) houses): $(final_selection_file(RANDOM_SEED))")
+            houses_df, n_target, fixing = final, nrow(final), false
         end
     end
 
