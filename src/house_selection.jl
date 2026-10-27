@@ -6,24 +6,34 @@ using CSV, DataFrames, JSON3, Random
 const WEEK_STEPS = 7 * 96                      # 15-min steps per week
 selection_file(seed) = joinpath(INPUT_PATH, "house_selection_seed$(seed).csv")
 final_selection_file(seed) = joinpath(INPUT_PATH, "house_selection_seed$(seed)_final.csv")
+pool_file() = joinpath(INPUT_PATH, "house_pool", "house_pool_representative.csv")
 
-"""make_house_selection(; n_houses, seed=RANDOM_SEED, evshift_weeks=2)
+"""make_house_selection(; n_houses, seed=RANDOM_SEED, evshift_weeks=2, pool=pool_file())
 
-Write `Input/house_selection_seed<seed>.csv`: all houses with a known fuse size in a random (seeded) order (candidates),
+Write `Input/house_selection_seed<seed>.csv`: the candidate houses in the order of `pool` (column `profile`; quality-
+checked houses ordered so that every first part has the national share of houses without electric heating, see
+`Input/house_pool/pool.py`), or with `pool=nothing` all houses with a known fuse size in a random (seeded) order,
 each with two different EVs (`ev_1`, `ev_2`) and a whole-week time shift for each (`shift_1`, `shift_2`). EVs are
 assigned from seeded shuffles of all EVs, one pass after the other. When there are fewer EVs than 2 x houses, each
 further pass uses the next shift of 0, +1, -1, +2, -2, ... weeks (up to evshift_weeks), so a reused car charges on
 other days; only after 2 x evshift_weeks + 1 passes does the same car with the same shift appear again.
 The first 2-EV run takes the first `n_houses` candidates that solve and saves them as the final selection
 (`final_selection_file`), used by all later runs. Returns the candidate table."""
-function make_house_selection(; n_houses, seed=RANDOM_SEED, evshift_weeks=2)
+function make_house_selection(; n_houses, seed=RANDOM_SEED, evshift_weeks=2, pool=pool_file())
     facility_df = CSV.read(joinpath(INPUT_PATH, "facility.csv"), DataFrame)
     fuse = Dict(String(r.facility_id) => r.contract_fuse_size for r in eachrow(facility_df))
     header = String.(propertynames(CSV.File(joinpath(INPUT_PATH, "all_fuse_safe_houses.csv"); limit=1)))  # house ids only
     houses = [p for p in header if p ∉ ("id_timestamp", "time") && !ismissing(get(fuse, p, missing))]
-    length(houses) >= n_houses || error("Only $(length(houses)) houses with a known fuse size, cannot select $n_houses.")
     rng = MersenneTwister(seed)
-    order = shuffle(rng, houses)
+    if pool === nothing
+        order = shuffle(rng, houses)
+    else
+        order = String.(CSV.read(pool, DataFrame; types=Dict(:profile => String)).profile)
+        unknown = setdiff(order, houses)
+        isempty(unknown) || error("$(length(unknown)) houses in $pool lack a load profile or a known fuse size, e.g. $(first(unknown)).")
+        allunique(order) || error("$pool lists some houses more than once.")
+    end
+    length(order) >= n_houses || error("Only $(length(order)) candidate houses, cannot select $n_houses.")
 
     good_ids = JSON3.read(read(joinpath(INPUT_PATH, "ev_data", "EVs_charging_at_home.txt"), String), Vector{String})
     length(good_ids) >= 2 || error("Need at least 2 EV profiles.")
@@ -57,7 +67,8 @@ function make_house_selection(; n_houses, seed=RANDOM_SEED, evshift_weeks=2)
                    ev_1=ev1, shift_1=sh1, ev_2=ev2, shift_2=sh2, n_houses=n_houses)
     CSV.write(selection_file(seed), df)
     isfile(final_selection_file(seed)) && @warn "An old final selection exists ($(final_selection_file(seed))); delete it to start a new one."
-    println("Saved $(selection_file(seed)): $(nrow(df)) candidate houses ($(count(==(16), df.fuse)) with 16 A), " *
+    println("Saved $(selection_file(seed)): $(nrow(df)) candidate houses ($(count(==(16), df.fuse)) with 16 A) " *
+            (pool === nothing ? "in random order, " : "in the order of $(basename(pool)), ") *
             "$(length(good_ids)) EVs, $(npass) pass(es) over the EVs. The first 2-EV run keeps the first $n_houses that solve.")
     return df
 end
