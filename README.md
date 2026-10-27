@@ -8,7 +8,7 @@ MANORS is built around a shared optimization architecture (`makeparameters()`, `
 
 The two model versions currently implemented in this framework both focus on **EV charging**: they minimize electricity purchase cost (based on hourly area spot prices), public EV charging cost, and a monthly power tariff, subject to a main fuse limit, an EV battery state-of-charge balance, and EV home/away availability profiles. Other technology modules — such as the earlier PV generation + home battery (BESS) variant kept in [MANORS_loop.jl](src/MANORS_loop.jl)/[MANORS_multithread.jl](src/MANORS_multithread.jl) — are examples of the kind of add-on modules the framework is designed to accommodate.
 
-Input data (load profiles, facility/fuse metadata, EV mobility and charging data, and electricity prices) is read from `Input/`, and results are written as CSV files to `Output/`.
+Input data (load profiles, facility/fuse metadata, EV mobility and charging data, and electricity prices) is read from `Input/`, and results are written as CSV files to `Output/`. EV data is in `Input/ev_data/`: `homeshare.csv`, `tripenergy.csv` and `chargeenergy.csv` (one column per EV, 15-min steps; all EVs in these files are used) and `ID_Category_List_EP.csv` (nominal battery capacity; an EV without one gets the mean of the others).
 
 The following are the main scripts, found in [`src`](src):
 

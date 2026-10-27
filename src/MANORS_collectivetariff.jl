@@ -21,8 +21,7 @@ function makeparameters(area::Symbol)
 
     # EV parameters
     Random.seed!(RANDOM_SEED)
-    ev_folder  = joinpath(INPUT_PATH, "ev_data")
-    good_ids   = JSON3.read(read(joinpath(ev_folder, "EVs_charging_at_home.txt"), String), Vector{String})
+    good_ids   = all_ev_ids()
     ev_assignment = Dict(zip(load_profiles, shuffle(good_ids)))
 
     # Per-household parameters — stored as Dicts keyed by household id

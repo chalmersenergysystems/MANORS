@@ -35,7 +35,7 @@ function make_house_selection(; n_houses, seed=RANDOM_SEED, evshift_weeks=2, poo
     end
     length(order) >= n_houses || error("Only $(length(order)) candidate houses, cannot select $n_houses.")
 
-    good_ids = JSON3.read(read(joinpath(INPUT_PATH, "ev_data", "EVs_charging_at_home.txt"), String), Vector{String})
+    good_ids = all_ev_ids()
     length(good_ids) >= 2 || error("Need at least 2 EV profiles.")
     shifts = vcat(0, [s for w in 1:evshift_weeks for s in (w, -w)])      # 0, +1, -1, +2, -2, ...
     slots = Tuple{String, Int}[]

@@ -30,14 +30,24 @@ function prepare_elprice(df, ordered_timestamp)
     return elprice
 end
 
-function filter_ev_data(df::DataFrame, id_col::Symbol, good_ids::Vector{String})
-    col = id_col isa Symbol ? id_col : Symbol(id_col)
-    if col ∉ propertynames(df)
-        valid = filter(id -> Symbol(id) ∈ propertynames(df), good_ids)
-        return select(df, :id_timestamp, Symbol.(valid)...)
-    else
-        return filter(row -> row[col] in good_ids, df)
+const EV_FOLDER = joinpath(INPUT_PATH, "ev_data")
+
+"EV ids: the columns of `chargeenergy.csv` (all EVs in the EV files are used, they are already quality-filtered)."
+all_ev_ids() = [c for c in String.(propertynames(CSV.File(joinpath(EV_FOLDER, "chargeenergy.csv"); limit=1))) if c ∉ ("id_timestamp", "time")]
+
+"""Battery capacity per EV (columns `id`, `capacity_kWh`): the nominal capacity in `ID_Category_List_EP.csv`.
+EVs without a capacity get the mean of the others, with a warning."""
+function read_battery_cap(ids)
+    info = CSV.read(joinpath(EV_FOLDER, "ID_Category_List_EP.csv"), DataFrame)
+    cap = Dict(String(r[1]) => r["Nominal Battery Capacity"] for r in eachrow(info))
+    capacity = [get(cap, id, missing) for id in ids]
+    nocap = ids[ismissing.(capacity)]
+    if !isempty(nocap)
+        avg = round(sum(skipmissing(capacity)) / count(!ismissing, capacity), digits=1)
+        @warn "No battery capacity for EV(s) $(join(nocap, ", ")): using the mean of the others, $avg kWh."
+        capacity = coalesce.(capacity, avg)
     end
+    return DataFrame(id=ids, capacity_kWh=Float64.(capacity))
 end
 
 # Clean up dataframes
@@ -179,22 +189,16 @@ end
 
 # Read EV input data
 function read_EV_data()
-    # Define path
-    input_path = INPUT_PATH
-    ev_folder = joinpath(input_path, "ev_data")
-
-    # Read EV data
-    battery_cap = CSV.read(joinpath(ev_folder, "battery_cap.csv"), DataFrame)
-    homeshare = CSV.read(joinpath(ev_folder, "homeshare_ep.csv"), DataFrame)
-    tripenergy = CSV.read(joinpath(ev_folder, "tripenergy_ep.csv"), DataFrame)
-    chargeenergy = CSV.read(joinpath(ev_folder, "chargeenergy_ep.csv"), DataFrame)
-
-    # Select only good data
-    good_ids = JSON3.read(read(joinpath(ev_folder, "EVs_charging_at_home.txt"), String), Vector{String})
-    battery_cap = filter_ev_data(battery_cap, :id, good_ids)
-    homeshare = filter_ev_data(homeshare, :id, good_ids)
-    tripenergy = filter_ev_data(tripenergy, :id, good_ids)
-    chargeenergy = filter_ev_data(chargeenergy, :id, good_ids)
+    # Read EV data (one column per EV, one row per 15 min; an id_timestamp column is optional)
+    homeshare = CSV.read(joinpath(EV_FOLDER, "homeshare.csv"), DataFrame)
+    tripenergy = CSV.read(joinpath(EV_FOLDER, "tripenergy.csv"), DataFrame)
+    chargeenergy = CSV.read(joinpath(EV_FOLDER, "chargeenergy.csv"), DataFrame)
+    ids = all_ev_ids()
+    for (name, df) in (("homeshare", homeshare), ("tripenergy", tripenergy))
+        setdiff(ids, names(df)) == [] || error("$name.csv lacks EV(s) $(join(setdiff(ids, names(df)), ", ")) of chargeenergy.csv.")
+    end
+    homeshare, tripenergy, chargeenergy = (select(df, intersect(["id_timestamp"], names(df)), ids) for df in (homeshare, tripenergy, chargeenergy))
+    battery_cap = read_battery_cap(ids)
 
     # Fix driving demand data. Note: original data is negative for energy consumed
     for col in names(tripenergy)
