@@ -148,11 +148,13 @@ function build_netload_profiles(seed::Int)
     end
 end
 
-function collect_results(seed::Int, tariff::Int, area::String; n_ev::Int=1)
+function collect_results(seed::Int, tariff::Int, area::String; n_ev::Int=1, metrics=nothing)
     # Aggregates all per-household CSVs for one seed/tariff/area into per-metric wide CSVs
     # (one column per household) plus a one-day percentage breakdown. Works for both the
     # individual tariff model (tariff 0-2) and the collective tariff model (tariff 3), since
     # they share the same per-household file naming. n_ev = 2: the 2-EV runs (folders with suffix _2EV).
+    # metrics: names of the aggregates to write (e.g. ["houseload", "baseline", "optimized"], the ones REGAL reads);
+    # nothing = all. Each aggregate is ~35040 x (houses + 2) values, so writing only the needed ones saves time and disk.
     # If a final house selection exists (house_selection.jl), the columns follow its order, so every case and
     # 1 / 2 EVs list the same households in the same order (needed by REGAL); <area>_ev_mapping.csv gives the
     # household (profile) and EV(s) of each column.
@@ -199,6 +201,11 @@ function collect_results(seed::Int, tariff::Int, area::String; n_ev::Int=1)
         ("buy_el",        :df_buy_el,    :buy),
         ("sell_el",       :df_sell_el,   :sell)
     ]
+    if metrics !== nothing
+        unknown = setdiff(metrics, first.(metrics_config))
+        isempty(unknown) || error("Unknown metrics $(join(unknown, ", ")); choose from $(join(first.(metrics_config), ", ")).")
+        filter!(m -> m[1] in metrics, metrics_config)
+    end
 
     # Initialize the aggregate dataframes into a dictionary using the old df names as keys
     dfs = Dict(key => DataFrame(time = times) for (_, key, _) in metrics_config)
@@ -244,7 +251,7 @@ function collect_results(seed::Int, tariff::Int, area::String; n_ev::Int=1)
     oneday_pct = copy(oneday)
     
     # Safe division check against :optimized sum
-    opt_sum = sum(oneday[!, :optimized])
+    opt_sum = hasproperty(oneday, :optimized) ? sum(oneday[!, :optimized]) : 0.0
     for col in sum_cols
         if opt_sum > 0
             oneday_pct[!, col] = round.(oneday[!, col] ./ opt_sum .* 100, digits=2)
