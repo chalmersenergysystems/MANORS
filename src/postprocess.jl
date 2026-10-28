@@ -261,7 +261,7 @@ function collect_results(seed::Int, tariff::Int, area::String; n_ev::Int=1, metr
     end
 
     CSV.write(joinpath(agg_folder, area * "_oneday_pcts.csv"), oneday_pct)
-    println("  Saved aggregates for Seed$(seed)_$(area)_Tariff$(tariff)")
+    println("  Saved aggregates for Seed$(seed)_$(area)_Tariff$(tariff)$(ev_suffix) ($(length(csv_files)) houses, $n_ev EV(s)): $agg_folder")
 end
 
 function collect_results()
