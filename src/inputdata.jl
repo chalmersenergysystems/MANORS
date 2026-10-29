@@ -207,6 +207,14 @@ function read_EV_data()
     end
     # Converted to positive values representing energy consumed
 
+    # Logged charging is measured in the car (energy into the battery); divide by the charging efficiency to get the
+    # energy drawn from the grid, like ChargeEV in the optimization
+    eta_chargeEV = 0.95                     # charging efficiency, for V2G option: discharging efficiency defined in makeparameters() as eta_dischargeEV = eta_chargeEV
+    for col in names(chargeenergy)
+        col ∈ ("id_timestamp", "time") && continue
+        chargeenergy[!, col] = chargeenergy[!, col] ./ eta_chargeEV
+    end
+
     # Clean up dataframes
     homeshare = df_cleanup!(homeshare)
     tripenergy = df_cleanup!(tripenergy)
@@ -221,7 +229,6 @@ function read_EV_data()
     charger_power = 11                      # kW, home charger (one per house, shared by 2 EVs), choose between 3.7 kW (16A, mono-phase), 11 kW (16A, tri-phase) or 22 kW (32A, tri-phase), ref: https://www.evify.se/produkter/laddboxar/
     public_charger_power = 200              # kW, typical max power for public AC chargers
     cost_public_charge = 560.0              # €/MWh, based on average public charging prices in Sweden, ref: https://alternative-fuels-observatory.ec.europa.eu/markets-and-policy/market-and-consumer-insights/electric-vehicle-recharging-prices
-    eta_chargeEV = 0.95                     # charging efficiency, for V2G option: discharging efficiency defined in makeparameters() as eta_dischargeEV = eta_chargeEV
 
     return (; battery_cap, homeshare, tripenergy, chargeenergy, charger_power, public_charger_power, cost_public_charge, eta_chargeEV)
 end
